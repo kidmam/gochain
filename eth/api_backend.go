@@ -200,12 +200,11 @@ func (b *EthApiBackend) UnsubscribeLogsEvent(ch chan<- []*types.Log) {
 }
 
 func (b *EthApiBackend) SendTx(ctx context.Context, signedTx *types.Transaction) error {
-	return b.eth.txPool.AddLocal(ctx, signedTx)
+	return b.eth.txPool.AddLocal(signedTx)
 }
 
 func (b *EthApiBackend) GetPoolTransactions() types.Transactions {
-	ctx := context.TODO()
-	return b.eth.txPool.PendingList(ctx)
+	return b.eth.txPool.PendingList()
 }
 
 func (b *EthApiBackend) GetPoolTransaction(hash common.Hash) *types.Transaction {
@@ -217,15 +216,11 @@ func (b *EthApiBackend) GetPoolNonce(ctx context.Context, addr common.Address) (
 }
 
 func (b *EthApiBackend) Stats() (pending int, queued int) {
-	ctx, span := trace.StartSpan(context.Background(), "EthApiBackend.Stats")
-	defer span.End()
-	return b.eth.txPool.StatsCtx(ctx)
+	return b.eth.txPool.Stats()
 }
 
 func (b *EthApiBackend) TxPoolContent(ctx context.Context) (map[common.Address]types.Transactions, map[common.Address]types.Transactions) {
-	ctx, span := trace.StartSpan(ctx, "EthApiBackend.TxPoolContent")
-	defer span.End()
-	return b.eth.TxPool().Content(ctx)
+	return b.eth.TxPool().Content()
 }
 
 func (b *EthApiBackend) SubscribeNewTxsEvent(ch chan<- core.NewTxsEvent, name string) {

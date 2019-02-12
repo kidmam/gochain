@@ -112,7 +112,7 @@ func (t *BlockTest) Run() error {
 		return fmt.Errorf("genesis block state root does not match test: computed=%x, test=%x", gblock.Root().Bytes()[:6], t.json.Genesis.StateRoot[:6])
 	}
 
-	chain, err := core.NewBlockChain(ctx, db, nil, config, clique.New(params.DefaultCliqueConfig(), db), vm.Config{})
+	chain, err := core.NewBlockChain(db, nil, config, clique.New(params.DefaultCliqueConfig(), db), vm.Config{})
 	if err != nil {
 		return err
 	}
@@ -178,7 +178,7 @@ func (t *BlockTest) insertBlocks(ctx context.Context, blockchain *core.BlockChai
 		}
 		// RLP decoding worked, try to insert into chain:
 		blocks := types.Blocks{cb}
-		i, err := blockchain.InsertChain(ctx, blocks)
+		i, err := blockchain.InsertChain(blocks)
 		if err != nil {
 			if b.BlockHeader == nil {
 				continue // OK - block is supposed to be invalid, continue with next block

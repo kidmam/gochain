@@ -17,12 +17,10 @@
 package les
 
 import (
-	"context"
 	"sync"
 
 	"github.com/gochain-io/gochain/v3/common"
 	"github.com/gochain-io/gochain/v3/core/types"
-	"github.com/gochain-io/gochain/v3/log"
 )
 
 type ltrInfo struct {
@@ -123,17 +121,13 @@ func (self *LesTxRelay) send(txs types.Transactions, count int) {
 				return peer.GetRequestCost(SendTxMsg, len(ll))
 			},
 			canSend: func(dp distPeer) bool {
-				return dp.(*peer) == pp
+				return !dp.(*peer).isOnlyAnnounce && dp.(*peer) == pp
 			},
-			request: func(dp distPeer) func(context.Context) {
+			request: func(dp distPeer) func() {
 				peer := dp.(*peer)
 				cost := peer.GetRequestCost(SendTxMsg, len(ll))
 				peer.fcServer.QueueRequest(reqID, cost)
-				return func(ctx context.Context) {
-					if err := peer.SendTxs(ctx, reqID, cost, ll); err != nil {
-						log.Error("Cannot send txs in relay", "req_id", reqID, "err", err)
-					}
-				}
+				return func() { peer.SendTxs(reqID, cost, ll) }
 			},
 		}
 		self.reqDist.queue(rq)

@@ -17,6 +17,7 @@
 package eth
 
 import (
+	"context"
 	"time"
 
 	"github.com/gochain-io/gochain/v3/common"
@@ -25,7 +26,6 @@ import (
 	"github.com/gochain-io/gochain/v3/core/bloombits"
 	"github.com/gochain-io/gochain/v3/core/rawdb"
 	"github.com/gochain-io/gochain/v3/core/types"
-	"github.com/gochain-io/gochain/v3/log"
 	"github.com/gochain-io/gochain/v3/params"
 )
 
@@ -77,10 +77,6 @@ func (gc *GoChain) startBloomHandlers() {
 }
 
 const (
-	// bloomConfirms is the number of confirmation blocks before a bloom section is
-	// considered probably final and its rotated bits are calculated.
-	bloomConfirms = 256
-
 	// bloomThrottling is the time to wait between processing two consecutive index
 	// sections. It's useful during chain upgrades to prevent disk overload.
 	bloomThrottling = 100 * time.Millisecond
@@ -89,30 +85,28 @@ const (
 // BloomIndexer implements a core.ChainIndexer, building up a rotated bloom bits index
 // for the GoChain header bloom filters, permitting blazing fast filtering.
 type BloomIndexer struct {
-	size uint64 // section size to generate bloombits for
-
-	db  common.Database      // database instance to write index data and metadata into
-	gen *bloombits.Generator // generator to rotate the bloom bits crating the bloom index
-
-	section uint64      // Section is the section number being processed currently
-	head    common.Hash // Head is the hash of the last header processed
+	size    uint64               // section size to generate bloombits for
+	db      common.Database      // database instance to write index data and metadata into
+	gen     *bloombits.Generator // generator to rotate the bloom bits crating the bloom index
+	section uint64               // Section is the section number being processed currently
+	head    common.Hash          // Head is the hash of the last header processed
 }
 
 // NewBloomIndexer returns a chain indexer that generates bloom bits data for the
 // canonical chain for fast logs filtering.
-func NewBloomIndexer(db common.Database, size uint64) *core.ChainIndexer {
+func NewBloomIndexer(db common.Database, size, confirms uint64) *core.ChainIndexer {
 	backend := &BloomIndexer{
 		db:   db,
 		size: size,
 	}
 	table := common.NewTablePrefixer(db.GlobalTable(), string(rawdb.BloomBitsIndexPrefix))
 
-	return core.NewChainIndexer(db, table, backend, size, bloomConfirms, bloomThrottling, "bloombits")
+	return core.NewChainIndexer(db, table, backend, size, confirms, bloomThrottling, "bloombits")
 }
 
 // Reset implements core.ChainIndexerBackend, starting a new bloombits index
 // section.
-func (b *BloomIndexer) Reset(section uint64, lastSectionHead common.Hash) error {
+func (b *BloomIndexer) Reset(ctx context.Context, section uint64, lastSectionHead common.Hash) error {
 	gen, err := bloombits.NewGenerator(uint(b.size))
 	b.gen, b.section, b.head = gen, section, common.Hash{}
 	return err
@@ -120,11 +114,10 @@ func (b *BloomIndexer) Reset(section uint64, lastSectionHead common.Hash) error 
 
 // Process implements core.ChainIndexerBackend, adding a new header's bloom into
 // the index.
-func (b *BloomIndexer) Process(header *types.Header) {
-	if err := b.gen.AddBloom(uint(header.Number.Uint64()-b.section*b.size), header.Bloom); err != nil {
-		log.Error("Cannot add bloom to indexer")
-	}
+func (b *BloomIndexer) Process(ctx context.Context, header *types.Header) error {
+	b.gen.AddBloom(uint(header.Number.Uint64()-b.section*b.size), header.Bloom)
 	b.head = header.Hash()
+	return nil
 }
 
 // Commit implements core.ChainIndexerBackend, finalizing the bloom section and

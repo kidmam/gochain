@@ -18,7 +18,6 @@
 package eth
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"math/big"
@@ -106,6 +105,17 @@ func New(sctx *node.ServiceContext, config *Config) (*GoChain, error) {
 	if !config.SyncMode.IsValid() {
 		return nil, fmt.Errorf("invalid sync mode %d", config.SyncMode)
 	}
+	if config.MinerGasPrice == nil || config.MinerGasPrice.Cmp(common.Big0) <= 0 {
+		log.Warn("Sanitizing invalid miner gas price", "provided", config.MinerGasPrice, "updated", DefaultConfig.MinerGasPrice)
+		config.MinerGasPrice = new(big.Int).Set(DefaultConfig.MinerGasPrice)
+	}
+	if config.NoPruning && config.TrieDirtyCache > 0 {
+		config.TrieCleanCache += config.TrieDirtyCache
+		config.TrieDirtyCache = 0
+	}
+	log.Info("Allocated trie memory caches", "clean", common.StorageSize(config.TrieCleanCache)*1024*1024, "dirty", common.StorageSize(config.TrieDirtyCache)*1024*1024)
+
+	// Assemble the Ethereum object
 	chainDb, err := CreateDB(sctx, config, "chaindata")
 	if err != nil {
 		return nil, err
@@ -140,23 +150,27 @@ func New(sctx *node.ServiceContext, config *Config) (*GoChain, error) {
 		gasPrice:       config.MinerGasPrice,
 		etherbase:      config.Etherbase,
 		bloomRequests:  make(chan chan *bloombits.Retrieval),
-		bloomIndexer:   NewBloomIndexer(chainDb, params.BloomBitsBlocks),
+		bloomIndexer:   NewBloomIndexer(chainDb, params.BloomBitsBlocks, params.BloomConfirms),
 	}
 
 	log.Info("Initialising GoChain protocol", "versions", ProtocolVersions, "network", config.NetworkId)
 
 	if !config.SkipBcVersionCheck {
 		bcVersion := rawdb.ReadDatabaseVersion(chainDb.GlobalTable())
-		if bcVersion != core.BlockChainVersion && bcVersion != 0 {
-			return nil, fmt.Errorf("Blockchain DB version mismatch (%d / %d). Run geth upgradedb.\n", bcVersion, core.BlockChainVersion)
+		if bcVersion != nil && *bcVersion > core.BlockChainVersion {
+			return nil, fmt.Errorf("database version is v%d, GoChain %s only supports v%d", *bcVersion, params.Version, core.BlockChainVersion)
 		}
 		rawdb.WriteDatabaseVersion(chainDb.GlobalTable(), core.BlockChainVersion)
 	}
 	var (
-		vmConfig    = vm.Config{EnablePreimageRecording: config.EnablePreimageRecording}
-		cacheConfig = &core.CacheConfig{Disabled: config.NoPruning, TrieNodeLimit: config.TrieCache, TrieTimeLimit: config.TrieTimeout}
+		vmConfig = vm.Config{
+			EnablePreimageRecording: config.EnablePreimageRecording,
+			EWASMInterpreter:        config.EWASMInterpreter,
+			EVMInterpreter:          config.EVMInterpreter,
+		}
+		cacheConfig = &core.CacheConfig{Disabled: config.NoPruning, TrieCleanLimit: config.TrieCleanCache, TrieDirtyLimit: config.TrieDirtyCache, TrieTimeLimit: config.TrieTimeout}
 	)
-	eth.blockchain, err = core.NewBlockChain(context.Background(), chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig)
+	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, eth.chainConfig, eth.engine, vmConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -175,13 +189,12 @@ func New(sctx *node.ServiceContext, config *Config) (*GoChain, error) {
 	}
 	eth.txPool = core.NewTxPool(config.TxPool, eth.chainConfig, eth.blockchain)
 
-	if eth.protocolManager, err = NewProtocolManager(context.Background(), eth.chainConfig, config.SyncMode, config.NetworkId, eth.eventMux, eth.txPool, eth.engine, eth.blockchain, chainDb); err != nil {
+	if eth.protocolManager, err = NewProtocolManager(eth.chainConfig, config.SyncMode, config.NetworkId, eth.eventMux, eth.txPool, eth.engine, eth.blockchain, chainDb, config.Whitelist); err != nil {
 		return nil, err
 	}
+
 	eth.miner = miner.New(eth, eth.chainConfig, eth.EventMux(), eth.engine, config.MinerRecommit, config.MinerGasFloor, config.MinerGasCeil, eth.isLocalBlock)
-	if err := eth.miner.SetExtra(makeExtraData(config.MinerExtraData)); err != nil {
-		log.Error("Cannot set extra chain data", "err", err)
-	}
+	eth.miner.SetExtra(makeExtraData(config.MinerExtraData))
 
 	eth.ApiBackend = &EthApiBackend{eth: eth}
 	if g := eth.config.Genesis; g != nil {
@@ -368,7 +381,7 @@ func (gc *GoChain) StartMining(threads int) error {
 		gc.lock.RLock()
 		price := gc.gasPrice
 		gc.lock.RUnlock()
-		gc.txPool.SetGasPrice(context.Background(), price)
+		gc.txPool.SetGasPrice(price)
 
 		// Configure the local mining address
 		eb, err := gc.Etherbase()
@@ -382,7 +395,7 @@ func (gc *GoChain) StartMining(threads int) error {
 				log.Error("Etherbase account unavailable locally", "err", err)
 				return fmt.Errorf("signer missing: %v", err)
 			}
-			clique.Authorize(eb, wallet.SignHash)
+			clique.Authorize(eb, wallet.SignData)
 		}
 		// If mining is started, we can disable the transaction rejection mechanism
 		// introduced to speed sync times.

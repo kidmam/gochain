@@ -20,11 +20,11 @@
 package les
 
 import (
-	"context"
 	"crypto/rand"
 	"math/big"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gochain-io/gochain/v3/common"
 	"github.com/gochain-io/gochain/v3/common/hexutil"
@@ -34,11 +34,12 @@ import (
 	"github.com/gochain-io/gochain/v3/core/vm"
 	"github.com/gochain-io/gochain/v3/crypto"
 	"github.com/gochain-io/gochain/v3/eth"
+	"github.com/gochain-io/gochain/v3/ethdb"
 	"github.com/gochain-io/gochain/v3/event"
 	"github.com/gochain-io/gochain/v3/les/flowcontrol"
 	"github.com/gochain-io/gochain/v3/light"
 	"github.com/gochain-io/gochain/v3/p2p"
-	"github.com/gochain-io/gochain/v3/p2p/discover"
+	"github.com/gochain-io/gochain/v3/p2p/enode"
 	"github.com/gochain-io/gochain/v3/params"
 )
 
@@ -78,14 +79,14 @@ contract test {
 }
 */
 
-func testChainGen(ctx context.Context, i int, block *core.BlockGen) {
+func testChainGen(i int, block *core.BlockGen) {
 	signer := types.HomesteadSigner{}
 
 	switch i {
 	case 0:
 		// In block 1, the test bank sends account #1 some ether.
 		tx, _ := types.SignTx(types.NewTransaction(block.TxNonce(testBankAddress), acc1Addr, big.NewInt(10000), params.TxGas, nil, nil), signer, testBankKey)
-		block.AddTx(ctx, tx)
+		block.AddTx(tx)
 	case 1:
 		// In block 2, the test bank sends some more ether to account #1.
 		// acc1Addr passes it on to account #2.
@@ -99,17 +100,17 @@ func testChainGen(ctx context.Context, i int, block *core.BlockGen) {
 		testContractAddr = crypto.CreateAddress(acc1Addr, nonce+1)
 		tx4, _ := types.SignTx(types.NewContractCreation(nonce+2, big.NewInt(0), 200000, big.NewInt(0), testEventEmitterCode), signer, acc1Key)
 		testEventEmitterAddr = crypto.CreateAddress(acc1Addr, nonce+2)
-		block.AddTx(ctx, tx1)
-		block.AddTx(ctx, tx2)
-		block.AddTx(ctx, tx3)
-		block.AddTx(ctx, tx4)
+		block.AddTx(tx1)
+		block.AddTx(tx2)
+		block.AddTx(tx3)
+		block.AddTx(tx4)
 	case 2:
 		// Block 3 is empty but was mined by account #2.
 		block.SetCoinbase(acc2Addr)
 		block.SetExtra([]byte("yeehaw"))
 		data := common.Hex2Bytes("C16431B900000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001")
 		tx, _ := types.SignTx(types.NewTransaction(block.TxNonce(testBankAddress), testContractAddr, big.NewInt(0), 100000, nil, data), signer, testBankKey)
-		block.AddTx(ctx, tx)
+		block.AddTx(tx)
 	case 3:
 		// Block 4 includes modified extra data.
 		b2 := block.PrevBlock(1).Header()
@@ -118,8 +119,17 @@ func testChainGen(ctx context.Context, i int, block *core.BlockGen) {
 		b3.Extra = []byte("foo")
 		data := common.Hex2Bytes("C16431B900000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000002")
 		tx, _ := types.SignTx(types.NewTransaction(block.TxNonce(testBankAddress), testContractAddr, big.NewInt(0), 100000, nil, data), signer, testBankKey)
-		block.AddTx(ctx, tx)
+		block.AddTx(tx)
 	}
+}
+
+// testIndexers creates a set of indexers with specified params for testing purpose.
+func testIndexers(db common.Database, odr light.OdrBackend, iConfig *light.IndexerConfig) (*core.ChainIndexer, *core.ChainIndexer, *core.ChainIndexer) {
+	chtIndexer := light.NewChtIndexer(db, odr, iConfig.ChtSize, iConfig.ChtConfirms)
+	bloomIndexer := eth.NewBloomIndexer(db, iConfig.BloomSize, iConfig.BloomConfirms)
+	bloomTrieIndexer := light.NewBloomTrieIndexer(db, odr, iConfig.BloomSize, iConfig.BloomTrieSize)
+	bloomIndexer.AddChildIndexer(bloomTrieIndexer)
+	return chtIndexer, bloomIndexer, bloomTrieIndexer
 }
 
 func testRCL() RequestCostList {
@@ -133,9 +143,9 @@ func testRCL() RequestCostList {
 }
 
 // newTestProtocolManager creates a new protocol manager for testing purposes,
-// with the given number of blocks already known, and potential notification
-// channels for different events.
-func newTestProtocolManager(ctx context.Context, lightSync bool, blocks int, generator func(context.Context, int, *core.BlockGen), peers *peerSet, odr *LesOdr, db common.Database) (*ProtocolManager, error) {
+// with the given number of blocks already known, potential notification
+// channels for different events and relative chain indexers array.
+func newTestProtocolManager(lightSync bool, blocks int, generator func(int, *core.BlockGen), odr *LesOdr, peers *peerSet, db common.Database, ulcConfig *eth.ULCConfig) (*ProtocolManager, error) {
 	var (
 		evmux  = new(event.TypeMux)
 		engine = clique.NewFaker()
@@ -156,36 +166,24 @@ func newTestProtocolManager(ctx context.Context, lightSync bool, blocks int, gen
 	if lightSync {
 		chain, _ = light.NewLightChain(odr, gspec.Config, engine)
 	} else {
-		blockchain, _ := core.NewBlockChain(ctx, db, nil, gspec.Config, engine, vm.Config{})
-
-		chtIndexer := light.NewChtIndexer(db, false)
-		chtIndexer.Start(blockchain)
-
-		bbtIndexer := light.NewBloomTrieIndexer(db, false)
-
-		bloomIndexer := eth.NewBloomIndexer(db, params.BloomBitsBlocks)
-		bloomIndexer.AddChildIndexer(bbtIndexer)
-		bloomIndexer.Start(blockchain)
-
-		gchain, _ := core.GenerateChain(ctx, gspec.Config, genesis, clique.NewFaker(), db, blocks, generator)
-		if _, err := blockchain.InsertChain(ctx, gchain); err != nil {
+		blockchain, _ := core.NewBlockChain(db, nil, gspec.Config, engine, vm.Config{})
+		gchain, _ := core.GenerateChain(gspec.Config, genesis, clique.NewFaker(), db, blocks, generator)
+		if _, err := blockchain.InsertChain(gchain); err != nil {
 			panic(err)
 		}
 		chain = blockchain
 	}
 
-	var protocolVersions []uint
+	indexConfig := light.TestServerIndexerConfig
 	if lightSync {
-		protocolVersions = ClientProtocolVersions
-	} else {
-		protocolVersions = ServerProtocolVersions
+		indexConfig = light.TestClientIndexerConfig
 	}
-	pm, err := NewProtocolManager(ctx, gspec.Config, lightSync, protocolVersions, NetworkId, evmux, peers, chain, nil, db, odr, nil, make(chan struct{}), new(sync.WaitGroup))
+	pm, err := NewProtocolManager(gspec.Config, indexConfig, lightSync, NetworkId, evmux, engine, peers, chain, nil, db, odr, nil, nil, make(chan struct{}), new(sync.WaitGroup), ulcConfig)
 	if err != nil {
 		return nil, err
 	}
 	if !lightSync {
-		srv := &LesServer{protocolManager: pm}
+		srv := &LesServer{lesCommons: lesCommons{protocolManager: pm}}
 		pm.server = srv
 
 		srv.defParams = &flowcontrol.ServerParams{
@@ -201,11 +199,11 @@ func newTestProtocolManager(ctx context.Context, lightSync bool, blocks int, gen
 }
 
 // newTestProtocolManagerMust creates a new protocol manager for testing purposes,
-// with the given number of blocks already known, and potential notification
-// channels for different events. In case of an error, the constructor force-
+// with the given number of blocks already known, potential notification
+// channels for different events and relative chain indexers array. In case of an error, the constructor force-
 // fails the test.
-func newTestProtocolManagerMust(ctx context.Context, t *testing.T, lightSync bool, blocks int, generator func(context.Context, int, *core.BlockGen), peers *peerSet, odr *LesOdr, db common.Database) *ProtocolManager {
-	pm, err := newTestProtocolManager(ctx, lightSync, blocks, generator, peers, odr, db)
+func newTestProtocolManagerMust(t *testing.T, lightSync bool, blocks int, generator func(int, *core.BlockGen), odr *LesOdr, peers *peerSet, db common.Database, ulcConfig *eth.ULCConfig) *ProtocolManager {
+	pm, err := newTestProtocolManager(lightSync, blocks, generator, odr, peers, db, ulcConfig)
 	if err != nil {
 		t.Fatalf("Failed to create protocol manager: %v", err)
 	}
@@ -220,12 +218,12 @@ type testPeer struct {
 }
 
 // newTestPeer creates a new peer registered at the given protocol manager.
-func newTestPeer(ctx context.Context, t *testing.T, name string, version int, pm *ProtocolManager, shake bool) (*testPeer, <-chan error) {
+func newTestPeer(t *testing.T, name string, version int, pm *ProtocolManager, shake bool) (*testPeer, <-chan error) {
 	// Create a message pipe to communicate through
 	app, net := p2p.MsgPipe()
 
 	// Generate a random id and create the peer
-	var id discover.NodeID
+	var id enode.ID
 	rand.Read(id[:])
 
 	peer := pm.newPeer(version, NetworkId, p2p.NewPeer(id, name, nil), net)
@@ -235,7 +233,7 @@ func newTestPeer(ctx context.Context, t *testing.T, name string, version int, pm
 	go func() {
 		select {
 		case pm.newPeerCh <- peer:
-			errc <- pm.handle(ctx, peer)
+			errc <- pm.handle(peer)
 		case <-pm.quitSync:
 			errc <- p2p.DiscQuitting
 		}
@@ -257,12 +255,12 @@ func newTestPeer(ctx context.Context, t *testing.T, name string, version int, pm
 	return tp, errc
 }
 
-func newTestPeerPair(ctx context.Context, name string, version int, pm, pm2 *ProtocolManager) (*peer, <-chan error, *peer, <-chan error) {
+func newTestPeerPair(name string, version int, pm, pm2 *ProtocolManager) (*peer, <-chan error, *peer, <-chan error) {
 	// Create a message pipe to communicate through
 	app, net := p2p.MsgPipe()
 
 	// Generate a random id and create the peer
-	var id discover.NodeID
+	var id enode.ID
 	rand.Read(id[:])
 
 	peer := pm.newPeer(version, NetworkId, p2p.NewPeer(id, name, nil), net)
@@ -274,7 +272,7 @@ func newTestPeerPair(ctx context.Context, name string, version int, pm, pm2 *Pro
 	go func() {
 		select {
 		case pm.newPeerCh <- peer:
-			errc <- pm.handle(ctx, peer)
+			errc <- pm.handle(peer)
 		case <-pm.quitSync:
 			errc <- p2p.DiscQuitting
 		}
@@ -282,7 +280,7 @@ func newTestPeerPair(ctx context.Context, name string, version int, pm, pm2 *Pro
 	go func() {
 		select {
 		case pm2.newPeerCh <- peer2:
-			errc2 <- pm2.handle(ctx, peer2)
+			errc2 <- pm2.handle(peer2)
 		case <-pm2.quitSync:
 			errc2 <- p2p.DiscQuitting
 		}
@@ -327,4 +325,123 @@ func (p *testPeer) handshake(t *testing.T, td *big.Int, head common.Hash, headNu
 // manager of termination.
 func (p *testPeer) close() {
 	p.app.Close()
+}
+
+// TestEntity represents a network entity for testing with necessary auxiliary fields.
+type TestEntity struct {
+	db    common.Database
+	rPeer *peer
+	tPeer *testPeer
+	peers *peerSet
+	pm    *ProtocolManager
+	// Indexers
+	chtIndexer       *core.ChainIndexer
+	bloomIndexer     *core.ChainIndexer
+	bloomTrieIndexer *core.ChainIndexer
+}
+
+// newServerEnv creates a server testing environment with a connected test peer for testing purpose.
+func newServerEnv(t *testing.T, blocks int, protocol int, waitIndexers func(*core.ChainIndexer, *core.ChainIndexer, *core.ChainIndexer)) (*TestEntity, func()) {
+	db := ethdb.NewMemDatabase()
+	cIndexer, bIndexer, btIndexer := testIndexers(db, nil, light.TestServerIndexerConfig)
+
+	pm := newTestProtocolManagerMust(t, false, blocks, testChainGen, nil, nil, db, nil)
+	peer, _ := newTestPeer(t, "peer", protocol, pm, true)
+
+	cIndexer.Start(pm.blockchain.(*core.BlockChain))
+	bIndexer.Start(pm.blockchain.(*core.BlockChain))
+
+	// Wait until indexers generate enough index data.
+	if waitIndexers != nil {
+		waitIndexers(cIndexer, bIndexer, btIndexer)
+	}
+
+	return &TestEntity{
+			db:               db,
+			tPeer:            peer,
+			pm:               pm,
+			chtIndexer:       cIndexer,
+			bloomIndexer:     bIndexer,
+			bloomTrieIndexer: btIndexer,
+		}, func() {
+			peer.close()
+			// Note bloom trie indexer will be closed by it parent recursively.
+			cIndexer.Close()
+			bIndexer.Close()
+		}
+}
+
+// newClientServerEnv creates a client/server arch environment with a connected les server and light client pair
+// for testing purpose.
+func newClientServerEnv(t *testing.T, blocks int, protocol int, waitIndexers func(*core.ChainIndexer, *core.ChainIndexer, *core.ChainIndexer), newPeer bool) (*TestEntity, *TestEntity, func()) {
+	db, ldb := ethdb.NewMemDatabase(), ethdb.NewMemDatabase()
+	peers, lPeers := newPeerSet(), newPeerSet()
+
+	dist := newRequestDistributor(lPeers, make(chan struct{}))
+	rm := newRetrieveManager(lPeers, dist, nil)
+	odr := NewLesOdr(ldb, light.TestClientIndexerConfig, rm)
+
+	cIndexer, bIndexer, btIndexer := testIndexers(db, nil, light.TestServerIndexerConfig)
+	lcIndexer, lbIndexer, lbtIndexer := testIndexers(ldb, odr, light.TestClientIndexerConfig)
+	odr.SetIndexers(lcIndexer, lbtIndexer, lbIndexer)
+
+	pm := newTestProtocolManagerMust(t, false, blocks, testChainGen, nil, peers, db, nil)
+	lpm := newTestProtocolManagerMust(t, true, 0, nil, odr, lPeers, ldb, nil)
+
+	startIndexers := func(clientMode bool, pm *ProtocolManager) {
+		if clientMode {
+			lcIndexer.Start(pm.blockchain.(*light.LightChain))
+			lbIndexer.Start(pm.blockchain.(*light.LightChain))
+		} else {
+			cIndexer.Start(pm.blockchain.(*core.BlockChain))
+			bIndexer.Start(pm.blockchain.(*core.BlockChain))
+		}
+	}
+
+	startIndexers(false, pm)
+	startIndexers(true, lpm)
+
+	// Execute wait until function if it is specified.
+	if waitIndexers != nil {
+		waitIndexers(cIndexer, bIndexer, btIndexer)
+	}
+
+	var (
+		peer, lPeer *peer
+		err1, err2  <-chan error
+	)
+	if newPeer {
+		peer, err1, lPeer, err2 = newTestPeerPair("peer", protocol, pm, lpm)
+		select {
+		case <-time.After(time.Millisecond * 100):
+		case err := <-err1:
+			t.Fatalf("peer 1 handshake error: %v", err)
+		case err := <-err2:
+			t.Fatalf("peer 2 handshake error: %v", err)
+		}
+	}
+
+	return &TestEntity{
+			db:               db,
+			pm:               pm,
+			rPeer:            peer,
+			peers:            peers,
+			chtIndexer:       cIndexer,
+			bloomIndexer:     bIndexer,
+			bloomTrieIndexer: btIndexer,
+		}, &TestEntity{
+			db:               ldb,
+			pm:               lpm,
+			rPeer:            lPeer,
+			peers:            lPeers,
+			chtIndexer:       lcIndexer,
+			bloomIndexer:     lbIndexer,
+			bloomTrieIndexer: lbtIndexer,
+		}, func() {
+			// Note bloom trie indexers will be closed by their parents recursively.
+			cIndexer.Close()
+			bIndexer.Close()
+			lcIndexer.Close()
+			lbIndexer.Close()
+		}
 }

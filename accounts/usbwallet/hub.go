@@ -17,13 +17,10 @@
 package usbwallet
 
 import (
-	"context"
 	"errors"
 	"runtime"
 	"sync"
 	"time"
-
-	"go.opencensus.io/trace"
 
 	"github.com/gochain-io/gochain/v3/accounts"
 	"github.com/gochain-io/gochain/v3/event"
@@ -114,9 +111,6 @@ func (hub *Hub) Wallets() []accounts.Wallet {
 // refreshWallets scans the USB devices attached to the machine and updates the
 // list of wallets based on the found devices.
 func (hub *Hub) refreshWallets() {
-	ctx, span := trace.StartSpan(context.Background(), "Hub.refreshWallets")
-	defer span.End()
-
 	// Don't scan the USB like crazy it the user fetches wallets in a loop
 	hub.stateLock.RLock()
 	elapsed := time.Since(hub.refreshed)
@@ -133,7 +127,7 @@ func (hub *Hub) refreshWallets() {
 		// breaking the Ledger protocol if that is waiting for user confirmation. This
 		// is a bug acknowledged at Ledger, but it won't be fixed on old devices so we
 		// need to prevent concurrent comms ourselves. The more elegant solution would
-		// be to ditch enumeration in favor of hutplug events, but that don't work yet
+		// be to ditch enumeration in favor of hotplug events, but that don't work yet
 		// on Windows so if we need to hack it anyway, this is more elegant for now.
 		hub.commsLock.Lock()
 		if hub.commsPend > 0 { // A confirmation is pending, don't refresh
@@ -199,7 +193,7 @@ func (hub *Hub) refreshWallets() {
 
 	// Fire all wallet events and return
 	for _, event := range events {
-		hub.updateFeed.SendCtx(ctx, event)
+		hub.updateFeed.Send(event)
 	}
 }
 

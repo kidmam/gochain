@@ -130,7 +130,7 @@ func (api *PrivateMinerAPI) SetGasPrice(ctx context.Context, gasPrice hexutil.Bi
 	api.e.gasPrice = (*big.Int)(&gasPrice)
 	api.e.lock.Unlock()
 
-	api.e.txPool.SetGasPrice(ctx, (*big.Int)(&gasPrice))
+	api.e.txPool.SetGasPrice((*big.Int)(&gasPrice))
 	return true
 }
 
@@ -231,7 +231,7 @@ func (api *PrivateAdminAPI) ImportChain(ctx context.Context, file string) (bool,
 			continue
 		}
 		// Import the batch and reset the buffer
-		if _, err := api.eth.BlockChain().InsertChain(ctx, blocks); err != nil {
+		if _, err := api.eth.BlockChain().InsertChain(blocks); err != nil {
 			return false, fmt.Errorf("batch %d: failed to insert: %v", batch, err)
 		}
 		blocks = blocks[:0]
@@ -320,7 +320,7 @@ func (api *PrivateDebugAPI) GetBadBlocks(ctx context.Context) ([]*BadBlockArgs, 
 		} else {
 			results[i].RLP = fmt.Sprintf("0x%x", rlpBytes)
 		}
-		if results[i].Block, err = ethapi.RPCMarshalBlock(ctx, block, true, true); err != nil {
+		if results[i].Block, err = ethapi.RPCMarshalBlock(block, true, true); err != nil {
 			results[i].Block = map[string]interface{}{"error": err.Error()}
 		}
 	}

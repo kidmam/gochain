@@ -33,7 +33,6 @@ import (
 )
 
 func TestNodeIterator(t *testing.T) {
-	ctx := context.Background()
 	var (
 		fulldb  = ethdb.NewMemDatabase()
 		lightdb = ethdb.NewMemDatabase()
@@ -41,13 +40,14 @@ func TestNodeIterator(t *testing.T) {
 		genesis = gspec.MustCommit(fulldb)
 	)
 	gspec.MustCommit(lightdb)
-	blockchain, _ := core.NewBlockChain(ctx, fulldb, nil, params.TestChainConfig, clique.NewFullFaker(), vm.Config{})
-	gchain, _ := core.GenerateChain(ctx, params.TestChainConfig, genesis, clique.NewFaker(), fulldb, 4, testChainGen)
-	if _, err := blockchain.InsertChain(ctx, gchain); err != nil {
+	blockchain, _ := core.NewBlockChain(fulldb, nil, params.TestChainConfig, clique.NewFullFaker(), vm.Config{})
+	gchain, _ := core.GenerateChain(params.TestChainConfig, genesis, clique.NewFaker(), fulldb, 4, testChainGen)
+	if _, err := blockchain.InsertChain(gchain); err != nil {
 		panic(err)
 	}
 
-	odr := &testOdr{sdb: fulldb, ldb: lightdb}
+	ctx := context.Background()
+	odr := &testOdr{sdb: fulldb, ldb: lightdb, indexerConfig: TestClientIndexerConfig}
 	head := blockchain.CurrentHeader()
 	lightTrie, _ := NewStateDatabase(ctx, head, odr).OpenTrie(head.Root)
 	fullTrie, _ := state.NewDatabase(fulldb).OpenTrie(head.Root)
@@ -64,7 +64,7 @@ func diffTries(t1, t2 state.Trie) error {
 			spew.Dump(i2)
 			return fmt.Errorf("tries have different keys %x, %x", i1.Key, i2.Key)
 		}
-		if !bytes.Equal(i2.Value, i2.Value) {
+		if !bytes.Equal(i1.Value, i2.Value) {
 			return fmt.Errorf("tries differ at key %x", i1.Key)
 		}
 	}

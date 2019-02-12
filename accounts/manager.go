@@ -17,12 +17,9 @@
 package accounts
 
 import (
-	"context"
 	"reflect"
 	"sort"
 	"sync"
-
-	"go.opencensus.io/trace"
 
 	"github.com/gochain-io/gochain/v3/event"
 )
@@ -97,7 +94,6 @@ func (am *Manager) update() {
 	for {
 		select {
 		case event := <-am.updates:
-			ctx, span := trace.StartSpan(context.Background(), "Manager.update-updates")
 			// Wallet event arrived, update local cache
 			am.lock.Lock()
 			switch event.Kind {
@@ -109,8 +105,7 @@ func (am *Manager) update() {
 			am.lock.Unlock()
 
 			// Notify any listeners of the event
-			am.feed.SendCtx(ctx, event)
-			span.End()
+			am.feed.Send(event)
 
 		case errc := <-am.quit:
 			// Manager terminating, return

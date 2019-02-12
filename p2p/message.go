@@ -18,7 +18,6 @@ package p2p
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -26,64 +25,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go.opencensus.io/trace"
-
 	"github.com/gochain-io/gochain/v3/event"
-	"github.com/gochain-io/gochain/v3/p2p/discover"
+	"github.com/gochain-io/gochain/v3/p2p/enode"
 	"github.com/gochain-io/gochain/v3/rlp"
 )
-
-// eth protocol message codes
-const (
-	// Protocol messages belonging to eth/62
-	StatusMsg          = 0x00
-	NewBlockHashesMsg  = 0x01
-	TxMsg              = 0x02
-	GetBlockHeadersMsg = 0x03
-	BlockHeadersMsg    = 0x04
-	GetBlockBodiesMsg  = 0x05
-	BlockBodiesMsg     = 0x06
-	NewBlockMsg        = 0x07
-
-	// Protocol messages belonging to eth/63
-	GetNodeDataMsg = 0x0d
-	NodeDataMsg    = 0x0e
-	GetReceiptsMsg = 0x0f
-	ReceiptsMsg    = 0x10
-)
-
-func MsgCodeString(code uint64) string {
-	switch code {
-	case StatusMsg:
-		return "Status"
-	case NewBlockHashesMsg:
-		return "NewBlockHashes"
-	case TxMsg:
-		return "Tx"
-	case GetBlockHeadersMsg:
-		return "GetBlockHeaders"
-	case BlockHeadersMsg:
-		return "BlockHeaders"
-	case GetBlockBodiesMsg:
-		return "GetBlockBodies"
-	case BlockBodiesMsg:
-		return "BlockBodiesMsg"
-	case NewBlockMsg:
-		return "NewBlock"
-
-	case GetNodeDataMsg:
-		return "GetNodeData"
-	case NodeDataMsg:
-		return "NodeData"
-	case GetReceiptsMsg:
-		return "GetReceipts"
-	case ReceiptsMsg:
-		return "Receipts"
-
-	default:
-		return fmt.Sprintf("Unrecognized: %x", code)
-	}
-}
 
 // Msg defines the structure of a p2p message.
 //
@@ -132,7 +77,7 @@ type MsgWriter interface {
 	//
 	// Note that messages can be sent only once because their
 	// payload reader is drained.
-	WriteMsg(context.Context, Msg) error
+	WriteMsg(Msg) error
 }
 
 // MsgReadWriter provides reading and writing of encoded messages.
@@ -145,21 +90,12 @@ type MsgReadWriter interface {
 
 // Send writes an RLP-encoded message with the given code.
 // data should encode as an RLP list.
-// Deprecated. Use SendCtx instead.
 func Send(w MsgWriter, msgcode uint64, data interface{}) error {
-	return SendCtx(context.Background(), w, msgcode, data)
-}
-
-func SendCtx(ctx context.Context, w MsgWriter, msgcode uint64, data interface{}) error {
-	ctx, span := trace.StartSpan(ctx, "Send")
-	defer span.End()
-
 	size, r, err := rlp.EncodeToReader(data)
 	if err != nil {
 		return err
 	}
-
-	return w.WriteMsg(ctx, Msg{Code: msgcode, Size: uint32(size), Payload: r})
+	return w.WriteMsg(Msg{Code: msgcode, Size: uint32(size), Payload: r})
 }
 
 // SendItems writes an RLP with the given code and data elements.
@@ -173,10 +109,6 @@ func SendCtx(ctx context.Context, w MsgWriter, msgcode uint64, data interface{})
 //
 func SendItems(w MsgWriter, msgcode uint64, elems ...interface{}) error {
 	return Send(w, msgcode, elems)
-}
-
-func SendItemsCtx(ctx context.Context, w MsgWriter, msgcode uint64, elems ...interface{}) error {
-	return SendCtx(ctx, w, msgcode, elems)
 }
 
 // eofSignal wraps a reader with eof signaling. the eof channel is
@@ -240,15 +172,7 @@ type MsgPipeRW struct {
 
 // WriteMsg sends a messsage on the pipe.
 // It blocks until the receiver has consumed the message payload.
-func (p *MsgPipeRW) WriteMsg(ctx context.Context, msg Msg) error {
-	ctx, span := trace.StartSpan(ctx, "MsgPipeRW.WriteMsg")
-	defer span.End()
-
-	span.AddAttributes(
-		trace.StringAttribute("code", MsgCodeString(msg.Code)),
-		trace.Int64Attribute("size", int64(msg.Size)),
-	)
-
+func (p *MsgPipeRW) WriteMsg(msg Msg) error {
 	if atomic.LoadInt32(p.closed) == 0 {
 		consumed := make(chan struct{}, 1)
 		msg.Payload = &eofSignal{msg.Payload, msg.Size, consumed}
@@ -265,10 +189,6 @@ func (p *MsgPipeRW) WriteMsg(ctx context.Context, msg Msg) error {
 		case <-p.closing:
 		}
 	}
-	span.SetStatus(trace.Status{
-		Code:    trace.StatusCodeInternal,
-		Message: ErrPipeClosed.Error(),
-	})
 	return ErrPipeClosed
 }
 
@@ -310,21 +230,20 @@ func ExpectMsg(r MsgReader, code uint64, content interface{}) error {
 	}
 	if content == nil {
 		return msg.Discard()
-	} else {
-		contentEnc, err := rlp.EncodeToBytes(content)
-		if err != nil {
-			panic("content encode error: " + err.Error())
-		}
-		if int(msg.Size) != len(contentEnc) {
-			return fmt.Errorf("message size mismatch: got %d, want %d", msg.Size, len(contentEnc))
-		}
-		actualContent, err := ioutil.ReadAll(msg.Payload)
-		if err != nil {
-			return err
-		}
-		if !bytes.Equal(actualContent, contentEnc) {
-			return fmt.Errorf("message payload mismatch:\ngot:  %x\nwant: %x", actualContent, contentEnc)
-		}
+	}
+	contentEnc, err := rlp.EncodeToBytes(content)
+	if err != nil {
+		panic("content encode error: " + err.Error())
+	}
+	if int(msg.Size) != len(contentEnc) {
+		return fmt.Errorf("message size mismatch: got %d, want %d", msg.Size, len(contentEnc))
+	}
+	actualContent, err := ioutil.ReadAll(msg.Payload)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(actualContent, contentEnc) {
+		return fmt.Errorf("message payload mismatch:\ngot:  %x\nwant: %x", actualContent, contentEnc)
 	}
 	return nil
 }
@@ -335,13 +254,13 @@ type msgEventer struct {
 	MsgReadWriter
 
 	feed     *event.Feed
-	peerID   discover.NodeID
+	peerID   enode.ID
 	Protocol string
 }
 
 // newMsgEventer returns a msgEventer which sends message events to the given
 // feed
-func newMsgEventer(rw MsgReadWriter, feed *event.Feed, peerID discover.NodeID, proto string) *msgEventer {
+func newMsgEventer(rw MsgReadWriter, feed *event.Feed, peerID enode.ID, proto string) *msgEventer {
 	return &msgEventer{
 		MsgReadWriter: rw,
 		feed:          feed,
@@ -352,15 +271,15 @@ func newMsgEventer(rw MsgReadWriter, feed *event.Feed, peerID discover.NodeID, p
 
 // ReadMsg reads a message from the underlying MsgReadWriter and emits a
 // "message received" event
-func (self *msgEventer) ReadMsg() (Msg, error) {
-	msg, err := self.MsgReadWriter.ReadMsg()
+func (ev *msgEventer) ReadMsg() (Msg, error) {
+	msg, err := ev.MsgReadWriter.ReadMsg()
 	if err != nil {
 		return msg, err
 	}
-	self.feed.Send(&PeerEvent{
+	ev.feed.Send(&PeerEvent{
 		Type:     PeerEventTypeMsgRecv,
-		Peer:     self.peerID,
-		Protocol: self.Protocol,
+		Peer:     ev.peerID,
+		Protocol: ev.Protocol,
 		MsgCode:  &msg.Code,
 		MsgSize:  &msg.Size,
 	})
@@ -369,18 +288,15 @@ func (self *msgEventer) ReadMsg() (Msg, error) {
 
 // WriteMsg writes a message to the underlying MsgReadWriter and emits a
 // "message sent" event
-func (self *msgEventer) WriteMsg(ctx context.Context, msg Msg) error {
-	ctx, span := trace.StartSpan(ctx, "msgEventer.WriteMsg")
-	defer span.End()
-
-	err := self.MsgReadWriter.WriteMsg(ctx, msg)
+func (ev *msgEventer) WriteMsg(msg Msg) error {
+	err := ev.MsgReadWriter.WriteMsg(msg)
 	if err != nil {
 		return err
 	}
-	self.feed.SendCtx(ctx, &PeerEvent{
+	ev.feed.Send(&PeerEvent{
 		Type:     PeerEventTypeMsgSend,
-		Peer:     self.peerID,
-		Protocol: self.Protocol,
+		Peer:     ev.peerID,
+		Protocol: ev.Protocol,
 		MsgCode:  &msg.Code,
 		MsgSize:  &msg.Size,
 	})
@@ -389,8 +305,8 @@ func (self *msgEventer) WriteMsg(ctx context.Context, msg Msg) error {
 
 // Close closes the underlying MsgReadWriter if it implements the io.Closer
 // interface
-func (self *msgEventer) Close() error {
-	if v, ok := self.MsgReadWriter.(io.Closer); ok {
+func (ev *msgEventer) Close() error {
+	if v, ok := ev.MsgReadWriter.(io.Closer); ok {
 		return v.Close()
 	}
 	return nil

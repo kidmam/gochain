@@ -14,6 +14,7 @@ require (
 	github.com/btcsuite/btcd v0.0.0-20180418030112-675abc5df3c5
 	github.com/cespare/cp v1.0.0
 	github.com/cespare/xxhash v1.0.0
+	github.com/codahale/hdrhistogram v0.0.0-20161010025455-3a0bb77429bd // indirect
 	github.com/davecgh/go-spew v1.1.0
 	github.com/docker/docker v1.13.1
 	github.com/edsrzf/mmap-go v0.0.0-20170320065105-0bce6a688712
@@ -39,8 +40,8 @@ require (
 	github.com/karalabe/hid v0.0.0-20180420081245-2b4488a37358
 	github.com/kylelemons/godebug v0.0.0-20170820004349-d65d576e9348 // indirect
 	github.com/maruel/panicparse v1.1.1 // indirect
-	github.com/mattn/go-colorable v0.0.9
-	github.com/mattn/go-isatty v0.0.3 // indirect
+	github.com/mattn/go-colorable v0.1.0
+	github.com/mattn/go-isatty v0.0.3
 	github.com/mattn/go-runewidth v0.0.2 // indirect
 	github.com/minio/minio-go v6.0.13+incompatible
 	github.com/mitchellh/go-homedir v0.0.0-20161203194507-b8bc1bf76747 // indirect
@@ -51,6 +52,7 @@ require (
 	github.com/olekukonko/tablewriter v0.0.0-20180418011723-d5dd8a50526a
 	github.com/onsi/ginkgo v1.7.0 // indirect
 	github.com/onsi/gomega v1.4.3 // indirect
+	github.com/opentracing/opentracing-go v1.0.2
 	github.com/pborman/uuid v0.0.0-20170612153648-e790cca94e6c
 	github.com/peterh/liner v0.0.0-20180310181206-6106ee4fe3e8
 	github.com/pkg/errors v0.8.0 // indirect
@@ -63,13 +65,16 @@ require (
 	github.com/spaolacci/murmur3 v0.0.0-20180118202830-f09979ecbc72 // indirect
 	github.com/stretchr/testify v1.2.1
 	github.com/syndtr/goleveldb v0.0.0-20180502072349-ae970a0732be
+	github.com/uber-go/atomic v1.3.2 // indirect
+	github.com/uber/jaeger-client-go v2.15.0+incompatible
+	github.com/uber/jaeger-lib v1.5.0+incompatible // indirect
 	go.opencensus.io v0.14.0
+	go.uber.org/atomic v1.3.2 // indirect
 	golang.org/x/crypto v0.0.0-20190123085648-057139ce5d2b
 	golang.org/x/net v0.0.0-20180906233101-161cd47e91fd
 	golang.org/x/oauth2 v0.0.0-20180821212333-d2e6202438be // indirect
 	golang.org/x/sync v0.0.0-20180314180146-1d60e4601c6f
 	golang.org/x/sys v0.0.0-20180909124046-d0be0721c37e
-	golang.org/x/tools v0.0.0-20190121143147-24cd39ecf745
 	google.golang.org/api v0.0.0-20180904000447-0ad5a633fea1 // indirect
 	google.golang.org/appengine v1.1.0 // indirect
 	google.golang.org/genproto v0.0.0-20180831171423-11092d34479b // indirect

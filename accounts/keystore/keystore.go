@@ -21,7 +21,6 @@
 package keystore
 
 import (
-	"context"
 	"crypto/ecdsa"
 	crand "crypto/rand"
 	"errors"
@@ -33,8 +32,6 @@ import (
 	"runtime"
 	"sync"
 	"time"
-
-	"go.opencensus.io/trace"
 
 	"github.com/gochain-io/gochain/v3/accounts"
 	"github.com/gochain-io/gochain/v3/common"
@@ -53,7 +50,7 @@ var (
 var KeyStoreType = reflect.TypeOf(&KeyStore{})
 
 // KeyStoreScheme is the protocol scheme prefixing account and wallet URLs.
-var KeyStoreScheme = "keystore"
+const KeyStoreScheme = "keystore"
 
 // Maximum time between wallet refreshes (if filesystem notifications don't work).
 const walletRefreshCycle = 3 * time.Second
@@ -81,7 +78,7 @@ type unlocked struct {
 // NewKeyStore creates a keystore for the given directory.
 func NewKeyStore(keydir string, scryptN, scryptP int) *KeyStore {
 	keydir, _ = filepath.Abs(keydir)
-	ks := &KeyStore{storage: &keyStorePassphrase{keydir, scryptN, scryptP}}
+	ks := &KeyStore{storage: &keyStorePassphrase{keydir, scryptN, scryptP, false}}
 	ks.init(keydir)
 	return ks
 }
@@ -135,9 +132,6 @@ func (ks *KeyStore) Wallets() []accounts.Wallet {
 // refreshWallets retrieves the current account list and based on that does any
 // necessary wallet refreshes.
 func (ks *KeyStore) refreshWallets() {
-	ctx, span := trace.StartSpan(context.Background(), "KeyStore.refreshWallets")
-	defer span.End()
-
 	// Retrieve the current list of accounts
 	ks.mu.Lock()
 	accs := ks.cache.accounts()
@@ -176,7 +170,7 @@ func (ks *KeyStore) refreshWallets() {
 
 	// Fire all wallet events and return
 	for _, event := range events {
-		ks.updateFeed.SendCtx(ctx, event)
+		ks.updateFeed.Send(event)
 	}
 }
 

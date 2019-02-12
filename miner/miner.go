@@ -150,7 +150,7 @@ func (self *Miner) SetRecommitInterval(interval time.Duration) {
 func (self *Miner) Pending(ctx context.Context) (*types.Block, *state.StateDB) {
 	ctx, span := trace.StartSpan(ctx, "Miner.Pending")
 	defer span.End()
-	return self.worker.pending(ctx)
+	return self.worker.pending()
 }
 
 // PendingBlock returns the currently pending block.

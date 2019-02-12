@@ -17,7 +17,6 @@
 package eth
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,8 +24,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"go.opencensus.io/trace"
 
 	"github.com/gochain-io/gochain/v3/common"
 	"github.com/gochain-io/gochain/v3/consensus"
@@ -37,7 +34,7 @@ import (
 	"github.com/gochain-io/gochain/v3/event"
 	"github.com/gochain-io/gochain/v3/log"
 	"github.com/gochain-io/gochain/v3/p2p"
-	"github.com/gochain-io/gochain/v3/p2p/discover"
+	"github.com/gochain-io/gochain/v3/p2p/enode"
 	"github.com/gochain-io/gochain/v3/params"
 	"github.com/gochain-io/gochain/v3/rlp"
 )
@@ -83,6 +80,8 @@ type ProtocolManager struct {
 	txsCh         chan core.NewTxsEvent
 	minedBlockSub *event.TypeMuxSubscription
 
+	whitelist map[uint64]common.Hash
+
 	// channels for fetcher, syncer, txsyncLoop
 	newPeerCh   chan *peer
 	txsyncCh    chan *txsync
@@ -96,7 +95,7 @@ type ProtocolManager struct {
 
 // NewProtocolManager returns a new ethereum sub protocol manager. The GoChain sub protocol manages peers capable
 // with the ethereum network.
-func NewProtocolManager(ctx context.Context, config *params.ChainConfig, mode downloader.SyncMode, networkId uint64, mux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain *core.BlockChain, chaindb common.Database) (*ProtocolManager, error) {
+func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, networkId uint64, mux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain *core.BlockChain, chaindb common.Database, whitelist map[uint64]common.Hash) (*ProtocolManager, error) {
 	// Create the protocol manager with the base fields
 	manager := &ProtocolManager{
 		networkId:   networkId,
@@ -105,6 +104,7 @@ func NewProtocolManager(ctx context.Context, config *params.ChainConfig, mode do
 		blockchain:  blockchain,
 		chainconfig: config,
 		peers:       newPeerSet(),
+		whitelist:   whitelist,
 		newPeerCh:   make(chan *peer),
 		noMorePeers: make(chan struct{}),
 		txsyncCh:    make(chan *txsync),
@@ -145,7 +145,7 @@ func NewProtocolManager(ctx context.Context, config *params.ChainConfig, mode do
 			NodeInfo: func() interface{} {
 				return manager.NodeInfo()
 			},
-			PeerInfo: func(id discover.NodeID) interface{} {
+			PeerInfo: func(id enode.ID) interface{} {
 				if p := manager.peers.Peer(fmt.Sprintf("%x", id[:8])); p != nil {
 					return p.Info()
 				}
@@ -159,27 +159,20 @@ func NewProtocolManager(ctx context.Context, config *params.ChainConfig, mode do
 	// Construct the different synchronisation mechanisms
 	manager.downloader = downloader.New(mode, chaindb, manager.eventMux, blockchain, nil, manager.removePeer)
 
-	getBlock := func(ctx context.Context, hash common.Hash) *types.Block {
-		ctx, span := trace.StartSpan(ctx, "getBlock")
-		defer span.End()
-		return blockchain.GetBlockByHash(hash)
+	verifyHeader := func(header *types.Header) error {
+		return engine.VerifyHeader(blockchain, header)
 	}
-	verifyHeader := func(ctx context.Context, header *types.Header) error {
-		return engine.VerifyHeader(ctx, blockchain, header)
-	}
-	heighter := func() uint64 {
-		return blockchain.CurrentBlock().NumberU64()
-	}
-	inserter := func(ctx context.Context, blocks types.Blocks) (int, error) {
+	heighter := blockchain.CurrentBlock().NumberU64
+	inserter := func(blocks types.Blocks) (int, error) {
 		// If fast sync is running, deny importing weird blocks
 		if atomic.LoadUint32(&manager.fastSync) == 1 {
 			log.Warn("Discarded bad propagated block", "number", blocks[0].Number(), "hash", blocks[0].Hash())
 			return 0, nil
 		}
 		atomic.StoreUint32(&manager.acceptTxs, 1) // Mark initial sync done on any fetcher import
-		return manager.blockchain.InsertChain(ctx, blocks)
+		return manager.blockchain.InsertChain(blocks)
 	}
-	manager.fetcher = fetcher.New(getBlock, verifyHeader, manager.BroadcastBlock, heighter, inserter, manager.removePeer)
+	manager.fetcher = fetcher.New(blockchain.GetBlockByHash, verifyHeader, manager.BroadcastBlock, heighter, inserter, manager.removePeer)
 
 	return manager, nil
 }
@@ -289,7 +282,7 @@ func (pm *ProtocolManager) handle(p *peer) error {
 	}
 	// Propagate existing transactions. new transactions appearing
 	// after this will be sent via broadcasts.
-	pm.syncTransactions(context.Background(), p)
+	pm.syncTransactions(p)
 
 	// main loop. handle incoming messages.
 	for {
@@ -312,10 +305,6 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		return errResp(ErrMsgTooLarge, "%v > %v", msg.Size, ProtocolMaxMsgSize)
 	}
 	defer msg.Discard()
-
-	ctx, span := trace.StartSpan(context.Background(), "ProtocolManager.handleMsg")
-	defer span.End()
-	span.AddAttributes(trace.StringAttribute("code", p2p.MsgCodeString(msg.Code)))
 
 	// Handle the message depending on its contents
 	switch {
@@ -409,7 +398,7 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 				query.Origin.Number += query.Skip + 1
 			}
 		}
-		return p.SendBlockHeaders(ctx, headers)
+		return p.SendBlockHeaders(headers)
 
 	case msg.Code == BlockHeadersMsg:
 		// A batch of headers arrived to one of our previous requests
@@ -456,7 +445,7 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 				bytes += len(data)
 			}
 		}
-		return p.SendBlockBodiesRLP(ctx, bodies)
+		return p.SendBlockBodiesRLP(bodies)
 
 	case msg.Code == BlockBodiesMsg:
 		// A batch of block bodies arrived to one of our previous requests
@@ -507,7 +496,7 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 				bytes += len(entry)
 			}
 		}
-		return p.SendNodeData(ctx, data)
+		return p.SendNodeData(data)
 
 	case p.version >= eth63 && msg.Code == NodeDataMsg:
 		// A batch of node state data arrived to one of our previous requests
@@ -555,7 +544,7 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 				bytes += len(encoded)
 			}
 		}
-		return p.SendReceiptsRLP(ctx, receipts)
+		return p.SendReceiptsRLP(receipts)
 
 	case p.version >= eth63 && msg.Code == ReceiptsMsg:
 		// A batch of receipts arrived to one of our previous requests
@@ -571,16 +560,11 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 	case msg.Code == NewBlockHashesMsg:
 		var announces newBlockHashesData
 		if err := msg.Decode(&announces); err != nil {
-			span.SetStatus(trace.Status{
-				Code:    trace.StatusCodeInternal,
-				Message: err.Error(),
-			})
 			return errResp(ErrDecode, "%v: %v", msg, err)
 		}
-		span.AddAttributes(trace.Int64Attribute("cnt", int64(len(announces))))
 		// Mark the hashes as present at the remote node
 		for _, block := range announces {
-			p.MarkBlock(ctx, block.Hash)
+			p.MarkBlock(block.Hash)
 		}
 		// Schedule all the unknown hashes for retrieval
 		unknown := make(newBlockHashesData, 0, len(announces))
@@ -590,15 +574,6 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 			}
 		}
 		go func() {
-			_, ns := trace.StartSpan(context.Background(), "ProtocolManager.handleMsg-notify-unknown-blocks")
-			defer ns.End()
-			ns.AddAttributes(trace.Int64Attribute("cnt", int64(len(unknown))))
-			parent := span.SpanContext()
-			ns.AddLink(trace.Link{
-				TraceID: parent.TraceID,
-				SpanID:  parent.SpanID,
-				Type:    trace.LinkTypeParent,
-			})
 			for _, block := range unknown {
 				if err := pm.fetcher.Notify(p.id, block.Hash, block.Number, time.Now(), p.RequestOneHeader, p.RequestBodies); err != nil {
 					log.Error("Cannot notify fetcher of new block hashes", "err", err)
@@ -616,7 +591,7 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		request.Block.ReceivedFrom = p
 
 		// Mark the peer as owning the block and schedule it for import
-		p.MarkBlock(ctx, request.Block.Hash())
+		p.MarkBlock(request.Block.Hash())
 		if err := pm.fetcher.Enqueue(p.id, request.Block); err != nil {
 			log.Error("Cannot enqueue new block to fetcher", "id", p.id, "err", err)
 		}
@@ -639,7 +614,7 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 			currentHash := currentBlock.Hash()
 			currentTD := pm.blockchain.GetTd(currentHash, currentBlock.NumberU64())
 			if cmp := trueTD.Cmp(currentTD); cmp > 0 || cmp == 0 && trueHead != currentHash {
-				go pm.synchronise(ctx, p)
+				go pm.synchronise(p)
 			}
 		}
 
@@ -650,34 +625,17 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		}
 		// Transactions can be processed, parse all of them and deliver to the pool
 		var txs []*types.Transaction
-		_, ds := trace.StartSpan(ctx, "Msg.Decode")
 		if err := msg.Decode(&txs); err != nil {
-			err := errResp(ErrDecode, "msg %v: %v", msg, err)
-			ds.SetStatus(trace.Status{
-				Code:    trace.StatusCodeInvalidArgument,
-				Message: err.Error(),
-			})
-			ds.End()
-			return err
+			return errResp(ErrDecode, "msg %v: %v", msg, err)
 		}
-		ds.End()
-		_, ms := trace.StartSpan(ctx, "peer.MarkTransaction")
-		ms.AddAttributes(trace.Int64Attribute("txs", int64(len(txs))))
 		for i, tx := range txs {
 			// Validate and mark the remote transaction
 			if tx == nil {
-				err := errResp(ErrDecode, "transaction %d is nil", i)
-				ms.SetStatus(trace.Status{
-					Code:    trace.StatusCodeInvalidArgument,
-					Message: err.Error(),
-				})
-				ms.End()
-				return err
+				return errResp(ErrDecode, "transaction %d is nil", i)
 			}
-			p.MarkTransaction(ctx, tx.Hash())
+			p.MarkTransaction(tx.Hash())
 		}
-		ms.End()
-		pm.txpool.AddRemotes(ctx, txs)
+		pm.txpool.AddRemotes(txs)
 
 	default:
 		return errResp(ErrInvalidMsgCode, "%v", msg.Code)
@@ -687,12 +645,9 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 
 // BroadcastBlock will either propagate a block to a subset of it's peers, or
 // will only announce it's availability (depending what's requested).
-func (pm *ProtocolManager) BroadcastBlock(ctx context.Context, block *types.Block, propagate bool) {
-	ctx, span := trace.StartSpan(ctx, "ProtocolManager.BroadcastBlock")
-	defer span.End()
-
+func (pm *ProtocolManager) BroadcastBlock(block *types.Block, propagate bool) {
 	hash := block.Hash()
-	peers := pm.peers.PeersWithoutBlock(ctx, hash)
+	peers := pm.peers.PeersWithoutBlock(hash)
 
 	// If propagation is requested, send to all peers.
 	if propagate {
@@ -719,8 +674,8 @@ func (pm *ProtocolManager) BroadcastBlock(ctx context.Context, block *types.Bloc
 
 // BroadcastTxs propagates a batch of transactions to a subset of peers which are not known to already have them.
 // Returns without blocking after launching each peer send in separate concurrent goroutines.
-func (pm *ProtocolManager) BroadcastTxs(ctx context.Context, txs types.Transactions) {
-	for p, txs := range pm.peers.PeersWithoutTxs(ctx, txs) {
+func (pm *ProtocolManager) BroadcastTxs(txs types.Transactions) {
+	for p, txs := range pm.peers.PeersWithoutTxs(txs) {
 		p.SendTransactionsAsync(txs)
 	}
 }
@@ -731,19 +686,15 @@ func (pm *ProtocolManager) minedBroadcastLoop() {
 	for obj := range pm.minedBlockSub.Chan() {
 		switch ev := obj.Data.(type) {
 		case core.NewMinedBlockEvent:
-			ctx, span := trace.StartSpan(context.Background(), "ProtocolManager.minedBroadcastLoop-NewMinedBlockEvent")
-			pm.BroadcastBlock(ctx, ev.Block, true)  // First propagate block to peers
-			pm.BroadcastBlock(ctx, ev.Block, false) // Only then announce to the rest
-			span.End()
+			pm.BroadcastBlock(ev.Block, true)  // First propagate block to peers
+			pm.BroadcastBlock(ev.Block, false) // Only then announce to the rest
 		}
 	}
 }
 
 func (pm *ProtocolManager) txBroadcastLoop() {
 	for event := range pm.txsCh {
-		ctx, span := trace.StartSpan(context.Background(), "ProtocolManager.txBroadcastLoop-txsCh")
-		pm.BroadcastTxs(ctx, event.Txs)
-		span.End()
+		pm.BroadcastTxs(event.Txs)
 	}
 }
 

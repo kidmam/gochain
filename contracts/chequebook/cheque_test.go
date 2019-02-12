@@ -17,7 +17,6 @@
 package chequebook
 
 import (
-	"context"
 	"crypto/ecdsa"
 	"math/big"
 	"os"
@@ -47,18 +46,17 @@ func newTestBackend() *backends.SimulatedBackend {
 		addr0: {Balance: big.NewInt(1000000000)},
 		addr1: {Balance: big.NewInt(1000000000)},
 		addr2: {Balance: big.NewInt(1000000000)},
-	})
+	}, 10000000)
 }
 
 func deploy(prvKey *ecdsa.PrivateKey, amount *big.Int, backend *backends.SimulatedBackend) (common.Address, error) {
-	ctx := context.TODO()
 	deployTransactor := bind.NewKeyedTransactor(prvKey)
 	deployTransactor.Value = amount
 	addr, _, _, err := contract.DeployChequebook(deployTransactor, backend)
 	if err != nil {
 		return common.Address{}, err
 	}
-	backend.Commit(ctx)
+	backend.Commit()
 	return addr, nil
 }
 
@@ -222,7 +220,6 @@ func TestVerifyErrors(t *testing.T) {
 }
 
 func TestDeposit(t *testing.T) {
-	ctx := context.TODO()
 	path0 := filepath.Join(os.TempDir(), "chequebook-test-0.json")
 	backend := newTestBackend()
 	contr0, _ := deploy(key0, new(big.Int), backend)
@@ -234,7 +231,7 @@ func TestDeposit(t *testing.T) {
 
 	balance := new(big.Int).SetUint64(42)
 	chbook.Deposit(balance)
-	backend.Commit(ctx)
+	backend.Commit()
 	if chbook.Balance().Cmp(balance) != 0 {
 		t.Fatalf("expected balance %v, got %v", balance, chbook.Balance())
 	}
@@ -244,7 +241,7 @@ func TestDeposit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	backend.Commit(ctx)
+	backend.Commit()
 	exp := new(big.Int).SetUint64(41)
 	if chbook.Balance().Cmp(exp) != 0 {
 		t.Fatalf("expected balance %v, got %v", exp, chbook.Balance())
@@ -256,12 +253,12 @@ func TestDeposit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	backend.Commit(ctx)
+	backend.Commit()
 	_, err = chbook.Issue(addr1, amount)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	backend.Commit(ctx)
+	backend.Commit()
 	if chbook.Balance().Cmp(balance) != 0 {
 		t.Fatalf("expected balance %v, got %v", balance, chbook.Balance())
 	}
@@ -272,31 +269,31 @@ func TestDeposit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	backend.Commit(ctx)
+	backend.Commit()
 	_, err = chbook.Issue(addr1, amount)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	backend.Commit(ctx)
+	backend.Commit()
 
 	exp = new(big.Int).SetUint64(40)
 	if chbook.Balance().Cmp(exp) != 0 {
 		t.Fatalf("expected balance %v, got %v", exp, chbook.Balance())
 	}
 
-	// autodeposit every 30ms if new cheque issued
-	interval := 30 * time.Millisecond
+	// autodeposit every 200ms if new cheque issued
+	interval := 200 * time.Millisecond
 	chbook.AutoDeposit(interval, common.Big1, balance)
 	_, err = chbook.Issue(addr1, amount)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	backend.Commit(ctx)
+	backend.Commit()
 	_, err = chbook.Issue(addr1, amount)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	backend.Commit(ctx)
+	backend.Commit()
 
 	exp = new(big.Int).SetUint64(38)
 	if chbook.Balance().Cmp(exp) != 0 {
@@ -304,7 +301,7 @@ func TestDeposit(t *testing.T) {
 	}
 
 	time.Sleep(3 * interval)
-	backend.Commit(ctx)
+	backend.Commit()
 	if chbook.Balance().Cmp(balance) != 0 {
 		t.Fatalf("expected balance %v, got %v", balance, chbook.Balance())
 	}
@@ -315,13 +312,13 @@ func TestDeposit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	backend.Commit(ctx)
+	backend.Commit()
 	_, err = chbook.Issue(addr1, amount)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
 	time.Sleep(3 * interval)
-	backend.Commit(ctx)
+	backend.Commit()
 	if chbook.Balance().Cmp(exp) != 0 {
 		t.Fatalf("expected balance %v, got %v", exp, chbook.Balance())
 	}
@@ -331,7 +328,7 @@ func TestDeposit(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 	time.Sleep(1 * interval)
-	backend.Commit(ctx)
+	backend.Commit()
 
 	if chbook.Balance().Cmp(balance) != 0 {
 		t.Fatalf("expected balance %v, got %v", balance, chbook.Balance())
@@ -344,7 +341,7 @@ func TestDeposit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	backend.Commit(ctx)
+	backend.Commit()
 
 	_, err = chbook.Issue(addr1, common.Big2)
 	if err != nil {
@@ -352,17 +349,15 @@ func TestDeposit(t *testing.T) {
 	}
 
 	time.Sleep(1 * interval)
-	backend.Commit(ctx)
+	backend.Commit()
 
 	exp = new(big.Int).SetUint64(39)
 	if chbook.Balance().Cmp(exp) != 0 {
 		t.Fatalf("expected balance %v, got %v", exp, chbook.Balance())
 	}
-
 }
 
 func TestCash(t *testing.T) {
-	ctx := context.TODO()
 	path := filepath.Join(os.TempDir(), "chequebook-test.json")
 	backend := newTestBackend()
 	contr0, _ := deploy(key0, common.Big2, backend)
@@ -378,7 +373,7 @@ func TestCash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	backend.Commit(ctx)
+	backend.Commit()
 	chbox, err := NewInbox(key1, contr0, addr1, &key0.PublicKey, backend)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -391,19 +386,19 @@ func TestCash(t *testing.T) {
 	if _, err = ch.Cash(chbook.session); err != nil {
 		t.Fatal("Cash failed:", err)
 	}
-	backend.Commit(ctx)
+	backend.Commit()
 
 	chbook.balance = new(big.Int).Set(common.Big3)
 	ch0, err := chbook.Issue(addr1, amount)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	backend.Commit(ctx)
+	backend.Commit()
 	ch1, err := chbook.Issue(addr1, amount)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	backend.Commit(ctx)
+	backend.Commit()
 
 	interval := 10 * time.Millisecond
 	// setting autocash with interval of 10ms
@@ -416,10 +411,10 @@ func TestCash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	backend.Commit(ctx)
+	backend.Commit()
 	// after 3x interval time and 2 cheques received, exactly one cashing tx is sent
 	time.Sleep(4 * interval)
-	backend.Commit(ctx)
+	backend.Commit()
 
 	// after stopping autocash no more tx are sent
 	ch2, err := chbook.Issue(addr1, amount)
@@ -432,7 +427,7 @@ func TestCash(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 	time.Sleep(2 * interval)
-	backend.Commit(ctx)
+	backend.Commit()
 
 	// autocash below 1
 	chbook.balance = big.NewInt(2)
@@ -442,24 +437,24 @@ func TestCash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	backend.Commit(ctx)
+	backend.Commit()
 
 	ch4, err := chbook.Issue(addr1, amount)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	backend.Commit(ctx)
+	backend.Commit()
 
 	_, err = chbox.Receive(ch3)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	backend.Commit(ctx)
+	backend.Commit()
 	_, err = chbox.Receive(ch4)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	backend.Commit(ctx)
+	backend.Commit()
 
 	// autochash on receipt when maxUncashed is 0
 	chbook.balance = new(big.Int).Set(common.Big2)
@@ -469,7 +464,7 @@ func TestCash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	backend.Commit(ctx)
+	backend.Commit()
 
 	ch6, err := chbook.Issue(addr1, amount)
 	if err != nil {
@@ -480,12 +475,12 @@ func TestCash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	backend.Commit(ctx)
+	backend.Commit()
 
 	_, err = chbox.Receive(ch6)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	backend.Commit(ctx)
+	backend.Commit()
 
 }

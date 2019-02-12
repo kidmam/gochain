@@ -52,13 +52,12 @@ var waitDeployedTests = map[string]struct {
 }
 
 func TestWaitDeployed(t *testing.T) {
-	ctx := context.Background()
 	for name, test := range waitDeployedTests {
-		backend := backends.NewSimulatedBackend(core.GenesisAlloc{
-			crypto.PubkeyToAddress(testKey.PublicKey): {
-				Balance: big.NewInt(10000000000),
-			},
-		})
+		backend := backends.NewSimulatedBackend(
+			core.GenesisAlloc{
+				crypto.PubkeyToAddress(testKey.PublicKey): {Balance: big.NewInt(10000000000)},
+			}, 10000000,
+		)
 
 		// Create the transaction.
 		tx := types.NewContractCreation(0, big.NewInt(0), test.gas, big.NewInt(1), common.FromHex(test.code))
@@ -69,6 +68,7 @@ func TestWaitDeployed(t *testing.T) {
 			err     error
 			address common.Address
 			mined   = make(chan struct{})
+			ctx     = context.Background()
 		)
 		go func() {
 			address, err = bind.WaitDeployed(ctx, backend, tx)
@@ -77,7 +77,7 @@ func TestWaitDeployed(t *testing.T) {
 
 		// Send and mine the transaction.
 		backend.SendTransaction(ctx, tx)
-		backend.Commit(ctx)
+		backend.Commit()
 
 		select {
 		case <-mined:

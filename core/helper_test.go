@@ -85,6 +85,5 @@ func NewTestManager() *TestManager {
 	// testManager.txPool = NewTxPool(testManager)
 	// testManager.blockChain = NewBlockChain(testManager)
 	// testManager.stateManager = NewStateManager(testManager)
-
 	return testManager
 }

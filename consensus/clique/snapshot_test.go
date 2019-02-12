@@ -18,7 +18,6 @@ package clique
 
 import (
 	"bytes"
-	"context"
 	"crypto/ecdsa"
 	"math/big"
 	"testing"
@@ -58,7 +57,7 @@ func (ap *testerAccountPool) sign(header *types.Header, signer string) {
 		ap.accounts[signer], _ = crypto.GenerateKey()
 	}
 	// Sign the header and embed the signature in extra data
-	sig, _ := crypto.Sign(sigHash(header).Bytes(), ap.accounts[signer])
+	sig, _ := crypto.Sign(SealHash(header).Bytes(), ap.accounts[signer])
 	header.Signer = sig
 }
 
@@ -483,7 +482,7 @@ func (tt *votingTest) run(t *testing.T) {
 	head := headers[len(headers)-1]
 
 	snap, err := New(&params.CliqueConfig{Epoch: tt.epoch}, db).
-		snapshot(context.Background(), &testerChainReader{db: db}, head.Number.Uint64(), head.Hash(), headers)
+		snapshot(&testerChainReader{db: db}, head.Number.Uint64(), head.Hash(), headers)
 	if err != nil {
 		t.Errorf("failed to create voting snapshot: %v", err)
 		return

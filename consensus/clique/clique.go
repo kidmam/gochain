@@ -19,16 +19,15 @@ package clique
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"math/rand"
 	"sync"
 	"time"
 
 	"github.com/hashicorp/golang-lru"
-	"go.opencensus.io/trace"
 	"golang.org/x/crypto/sha3"
 
 	"github.com/gochain-io/gochain/v3/accounts"
@@ -135,39 +134,6 @@ var (
 	ErrIneligibleSigner = errors.New("signer is not eligible to sign this block")
 )
 
-// sigHash returns the hash which is used as input for the proof-of-authority
-// signing. It is the hash of the entire header apart from the 65 byte signature
-// contained at the end of the extra data.
-//
-// Note, the method requires the extra data to be at least 65 bytes, otherwise it
-// panics. This is done to avoid accidentally using both forms (signature present
-// or not), which could be abused to produce different hashes for the same header.
-func sigHash(header *types.Header) (hash common.Hash) {
-	hasher := sha3.NewLegacyKeccak256()
-
-	rlp.Encode(hasher, []interface{}{
-		header.ParentHash,
-		header.UncleHash,
-		header.Coinbase,
-		header.Root,
-		header.TxHash,
-		header.ReceiptHash,
-		header.Bloom,
-		header.Difficulty,
-		header.Number,
-		header.GasLimit,
-		header.GasUsed,
-		header.Time,
-		header.Signers,
-		header.Voters,
-		header.Extra, // Yes, this will panic if extra is too short
-		header.MixDigest,
-		header.Nonce,
-	})
-	hasher.Sum(hash[:0])
-	return hash
-}
-
 // ecrecover extracts the Ethereum account address from a signed header.
 func ecrecover(header *types.Header, sigcache *lru.ARCCache) (common.Address, error) {
 	// If the signature's already cached, return that
@@ -182,7 +148,7 @@ func ecrecover(header *types.Header, sigcache *lru.ARCCache) (common.Address, er
 	signature := header.Signer
 
 	// Recover the public key and the Ethereum address
-	pubkey, err := crypto.Ecrecover(sigHash(header).Bytes(), signature)
+	pubkey, err := crypto.Ecrecover(SealHash(header).Bytes(), signature)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -243,39 +209,35 @@ func (c *Clique) Author(header *types.Header) (common.Address, error) {
 }
 
 // VerifyHeader checks whether a header conforms to the consensus rules.
-func (c *Clique) VerifyHeader(ctx context.Context, chain consensus.ChainReader, header *types.Header) error {
-	ctx, span := trace.StartSpan(ctx, "Clique.VerifyHeader")
-	defer span.End()
-	if err := c.verifyHeader(ctx, chain, header, nil); err != nil {
+func (c *Clique) VerifyHeader(chain consensus.ChainReader, header *types.Header) error {
+	if err := c.verifyHeader(chain, header, nil); err != nil {
 		return err
 	}
-	if err := c.verifyCascadingFields(ctx, chain, header, nil); err != nil {
+	if err := c.verifyCascadingFields(chain, header, nil); err != nil {
 		return err
 	}
-	return c.verifySeal(ctx, chain, header, nil)
+	return c.verifySeal(chain, header, nil)
 }
 
 // VerifyHeaders is similar to VerifyHeader, but verifies a batch of headers. The
 // method returns a quit channel to abort the operations and a results channel to
 // retrieve the async verifications (the order is that of the input slice).
-func (c *Clique) VerifyHeaders(ctx context.Context, chain consensus.ChainReader, headers []*types.Header) (chan<- struct{}, <-chan error) {
+func (c *Clique) VerifyHeaders(chain consensus.ChainReader, headers []*types.Header) (chan<- struct{}, <-chan error) {
 	verify := []verifyFn{c.verifyHeader, c.verifyCascadingFields, c.verifySeal}
-	return c.verifyHeaders(ctx, chain, headers, verify)
+	return c.verifyHeaders(chain, headers, verify)
 }
 
-func (c *Clique) verifyHeaders(ctx context.Context, chain consensus.ChainReader, headers []*types.Header, verify []verifyFn) (chan<- struct{}, <-chan error) {
+func (c *Clique) verifyHeaders(chain consensus.ChainReader, headers []*types.Header, verify []verifyFn) (chan<- struct{}, <-chan error) {
 	abort := make(chan struct{})
 	results := make(chan error, len(headers))
 
 	go func() {
-		ctx, span := trace.StartSpan(context.Background(), "Clique.verifyHeaders")
-		defer span.End()
 		defer close(results)
 		for i, header := range headers {
 			parents := headers[:i]
 			var err error
 			for _, fn := range verify {
-				err = fn(ctx, chain, header, parents)
+				err = fn(chain, header, parents)
 				if err != nil {
 					break
 				}
@@ -291,16 +253,13 @@ func (c *Clique) verifyHeaders(ctx context.Context, chain consensus.ChainReader,
 	return abort, results
 }
 
-type verifyFn func(ctx context.Context, chain consensus.ChainReader, header *types.Header, parents []*types.Header) error
+type verifyFn func(chain consensus.ChainReader, header *types.Header, parents []*types.Header) error
 
 // verifyHeader checks whether a header conforms to the consensus rules.The
 // caller may optionally pass in a batch of parents (ascending order) to avoid
 // looking those up from the database. This is useful for concurrently verifying
 // a batch of new headers.
-func (c *Clique) verifyHeader(ctx context.Context, chain consensus.ChainReader, header *types.Header, parents []*types.Header) error {
-	ctx, span := trace.StartSpan(ctx, "Clique.verifyHeader")
-	defer span.End()
-
+func (c *Clique) verifyHeader(chain consensus.ChainReader, header *types.Header, parents []*types.Header) error {
 	if header.Number == nil {
 		return errUnknownBlock
 	}
@@ -374,10 +333,7 @@ func verifyForkHashes(config *params.ChainConfig, header *types.Header) error {
 // rather depend on a batch of previous headers. The caller may optionally pass
 // in a batch of parents (ascending order) to avoid looking those up from the
 // database. This is useful for concurrently verifying a batch of new headers.
-func (c *Clique) verifyCascadingFields(ctx context.Context, chain consensus.ChainReader, header *types.Header, parents []*types.Header) error {
-	ctx, span := trace.StartSpan(ctx, "Clique.verifyCascadingFields")
-	defer span.End()
-
+func (c *Clique) verifyCascadingFields(chain consensus.ChainReader, header *types.Header, parents []*types.Header) error {
 	// Don't waste time checking blocks from the future
 	if header.Time.Cmp(big.NewInt(time.Now().Unix())) > 0 {
 		return consensus.ErrFutureBlock
@@ -401,7 +357,7 @@ func (c *Clique) verifyCascadingFields(ctx context.Context, chain consensus.Chai
 		return ErrInvalidTimestamp
 	}
 	// Retrieve the snapshot needed to verify this header and cache it
-	snap, err := c.snapshot(ctx, chain, number-1, header.ParentHash, parents)
+	snap, err := c.snapshot(chain, number-1, header.ParentHash, parents)
 	if err != nil {
 		return err
 	}
@@ -422,10 +378,7 @@ func (c *Clique) verifyCascadingFields(ctx context.Context, chain consensus.Chai
 }
 
 // snapshot retrieves the authorization snapshot at a given point in time.
-func (c *Clique) snapshot(ctx context.Context, chain consensus.ChainReader, number uint64, hash common.Hash, parents []*types.Header) (*Snapshot, error) {
-	ctx, span := trace.StartSpan(ctx, "Clique.snapshot")
-	defer span.End()
-
+func (c *Clique) snapshot(chain consensus.ChainReader, number uint64, hash common.Hash, parents []*types.Header) (*Snapshot, error) {
 	// Search for a snapshot in memory or on disk for checkpoints
 	var (
 		headers []*types.Header
@@ -451,7 +404,7 @@ func (c *Clique) snapshot(ctx context.Context, chain consensus.ChainReader, numb
 			if genesis == nil {
 				return nil, errors.New("no genesis block found")
 			}
-			if err := c.VerifyHeader(ctx, chain, genesis); err != nil {
+			if err := c.VerifyHeader(chain, genesis); err != nil {
 				return nil, err
 			}
 			snap = newGenesisSnapshot(c.config, c.signatures, 0, genesis.Hash(), genesis.Signers, genesis.Voters)
@@ -484,7 +437,7 @@ func (c *Clique) snapshot(ctx context.Context, chain consensus.ChainReader, numb
 	for i := 0; i < len(headers)/2; i++ {
 		headers[i], headers[len(headers)-1-i] = headers[len(headers)-1-i], headers[i]
 	}
-	snap, err := snap.apply(ctx, headers)
+	snap, err := snap.apply(headers)
 	if err != nil {
 		return nil, err
 	}
@@ -504,17 +457,14 @@ func (c *Clique) snapshot(ctx context.Context, chain consensus.ChainReader, numb
 // consensus protocol requirements. The method accepts an optional list of parent
 // headers that aren't yet part of the local blockchain to generate the snapshots
 // from.
-func (c *Clique) verifySeal(ctx context.Context, chain consensus.ChainReader, header *types.Header, parents []*types.Header) error {
-	ctx, span := trace.StartSpan(ctx, "Clique.verifySeal")
-	defer span.End()
-
+func (c *Clique) verifySeal(chain consensus.ChainReader, header *types.Header, parents []*types.Header) error {
 	// The genesis block is the always valid dead-end
 	number := header.Number.Uint64()
 	if number == 0 {
 		return nil
 	}
 	// Retrieve the snapshot needed to verify this header and cache it
-	snap, err := c.snapshot(ctx, chain, number-1, header.ParentHash, parents)
+	snap, err := c.snapshot(chain, number-1, header.ParentHash, parents)
 	if err != nil {
 		return err
 	}
@@ -543,16 +493,13 @@ func (c *Clique) verifySeal(ctx context.Context, chain consensus.ChainReader, he
 
 // Prepare implements consensus.Engine, preparing all the consensus fields of the
 // header for running the transactions on top.
-func (c *Clique) Prepare(ctx context.Context, chain consensus.ChainReader, header *types.Header) error {
-	ctx, span := trace.StartSpan(ctx, "Clique.Prepare")
-	defer span.End()
-
+func (c *Clique) Prepare(chain consensus.ChainReader, header *types.Header) error {
 	// If the block isn't a checkpoint, cast a random vote (good enough for now)
 	header.Nonce = types.BlockNonce{}
 
 	number := header.Number.Uint64()
 	// Assemble the voting snapshot to check which votes make sense
-	snap, err := c.snapshot(ctx, chain, number-1, header.ParentHash, nil)
+	snap, err := c.snapshot(chain, number-1, header.ParentHash, nil)
 	if err != nil {
 		return err
 	}
@@ -629,10 +576,7 @@ func (c *Clique) Authorize(signer common.Address, signFn consensus.SignerFn) {
 
 // Seal implements consensus.Engine, attempting to create a sealed block using
 // the local signing credentials.
-func (c *Clique) Seal(ctx context.Context, chain consensus.ChainReader, block *types.Block, stop <-chan struct{}) (*types.Block, *time.Time, error) {
-	ctx, span := trace.StartSpan(ctx, "Clique.Seal")
-	defer span.End()
-
+func (c *Clique) Seal(chain consensus.ChainReader, block *types.Block, stop <-chan struct{}) (*types.Block, *time.Time, error) {
 	header := block.Header()
 
 	// Sealing the genesis block is not supported
@@ -650,7 +594,7 @@ func (c *Clique) Seal(ctx context.Context, chain consensus.ChainReader, block *t
 	c.lock.RUnlock()
 
 	// Bail out if we're unauthorized to sign a block
-	snap, err := c.snapshot(ctx, chain, number-1, header.ParentHash, nil)
+	snap, err := c.snapshot(chain, number-1, header.ParentHash, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -668,7 +612,7 @@ func (c *Clique) Seal(ctx context.Context, chain consensus.ChainReader, block *t
 	}
 
 	// Sign all the things!
-	sighash, err := signFn(accounts.Account{Address: signer}, sigHash(header).Bytes())
+	sighash, err := signFn(accounts.Account{Address: signer}, accounts.MimetypeClique, CliqueRLP(header))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -689,7 +633,7 @@ func (c *Clique) Seal(ctx context.Context, chain consensus.ChainReader, block *t
 }
 
 func (c *Clique) SealHash(header *types.Header) common.Hash {
-	return sigHash(header)
+	return SealHash(header)
 }
 
 // CalcDifficulty returns the difficulty for signer, given all signers and their most recently signed block numbers,
@@ -733,6 +677,52 @@ func (c *Clique) APIs(chain consensus.ChainReader) []rpc.API {
 		Service:   &API{chain: chain, clique: c},
 		Public:    false,
 	}}
+}
+
+// SealHash returns the hash of a block prior to it being sealed.
+func SealHash(header *types.Header) (hash common.Hash) {
+	hasher := sha3.NewLegacyKeccak256()
+	encodeSigHeader(hasher, header)
+	hasher.Sum(hash[:0])
+	return hash
+}
+
+// CliqueRLP returns the rlp bytes which needs to be signed for the proof-of-authority
+// sealing. The RLP to sign consists of the entire header apart from the 65 byte signature
+// contained at the end of the extra data.
+//
+// Note, the method requires the extra data to be at least 65 bytes, otherwise it
+// panics. This is done to avoid accidentally using both forms (signature present
+// or not), which could be abused to produce different hashes for the same header.
+func CliqueRLP(header *types.Header) []byte {
+	b := new(bytes.Buffer)
+	encodeSigHeader(b, header)
+	return b.Bytes()
+}
+
+func encodeSigHeader(w io.Writer, header *types.Header) {
+	err := rlp.Encode(w, []interface{}{
+		header.ParentHash,
+		header.UncleHash,
+		header.Coinbase,
+		header.Root,
+		header.TxHash,
+		header.ReceiptHash,
+		header.Bloom,
+		header.Difficulty,
+		header.Number,
+		header.GasLimit,
+		header.GasUsed,
+		header.Time,
+		header.Signers,
+		header.Voters,
+		header.Extra,
+		header.MixDigest,
+		header.Nonce,
+	})
+	if err != nil {
+		panic("can't encode: " + err.Error())
+	}
 }
 
 // ExtraEnsureVanity returns a slice of length 32, trimming extra or filling with 0s as necessary.

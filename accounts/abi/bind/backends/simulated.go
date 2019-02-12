@@ -65,13 +65,13 @@ type SimulatedBackend struct {
 
 // NewSimulatedBackend creates a new binding backend using a simulated blockchain
 // for testing purposes.
-func NewSimulatedBackend(alloc core.GenesisAlloc) *SimulatedBackend {
+func NewSimulatedBackend(alloc core.GenesisAlloc, gasLimit uint64) *SimulatedBackend {
 	database := ethdb.NewMemDatabase()
 	genesis := core.Genesis{Config: params.AllCliqueProtocolChanges, Alloc: alloc,
 		Signer: hexutil.MustDecode("0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"),
 	}
 	genesis.MustCommit(database)
-	blockchain, err := core.NewBlockChain(context.Background(), database, nil, genesis.Config, clique.NewFaker(), vm.Config{})
+	blockchain, err := core.NewBlockChain(database, nil, genesis.Config, clique.NewFaker(), vm.Config{})
 	if err != nil {
 		panic(err)
 	}
@@ -88,20 +88,26 @@ func NewSimulatedBackend(alloc core.GenesisAlloc) *SimulatedBackend {
 
 // Commit imports all the pending transactions as a single block and starts a
 // fresh new state.
-func (b *SimulatedBackend) Commit(ctx context.Context) {
+func (b *SimulatedBackend) Commit() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if _, err := b.blockchain.InsertChain(ctx, []*types.Block{b.pendingBlock}); err != nil {
+	if _, err := b.blockchain.InsertChain([]*types.Block{b.pendingBlock}); err != nil {
 		panic(err) // This cannot happen unless the simulator is wrong, fail in that case
 	}
 	b.rollback()
 }
 
-// rollback aborts all pending transactions, reverting to the last committed state.
+// Rollback aborts all pending transactions, reverting to the last committed state.
+func (b *SimulatedBackend) Rollback() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.rollback()
+}
+
 func (b *SimulatedBackend) rollback() {
-	ctx := context.TODO()
-	blocks, _ := core.GenerateChain(ctx, b.config, b.blockchain.CurrentBlock(), clique.NewFaker(), b.database, 1, nil)
+	blocks, _ := core.GenerateChain(b.config, b.blockchain.CurrentBlock(), clique.NewFaker(), b.database, 1, nil)
 	statedb, err := b.blockchain.State()
 	if err != nil {
 		panic(err)
@@ -159,14 +165,33 @@ func (b *SimulatedBackend) StorageAt(ctx context.Context, contract common.Addres
 		return nil, errBlockNumberUnsupported
 	}
 	statedb, _ := b.blockchain.State()
-	s := statedb.GetState(contract, key)
-	return s[:], nil
+	val := statedb.GetState(contract, key)
+	return val[:], nil
 }
 
 // TransactionReceipt returns the receipt of a transaction.
 func (b *SimulatedBackend) TransactionReceipt(ctx context.Context, txHash common.Hash) (*types.Receipt, error) {
 	receipt, _, _, _ := rawdb.ReadReceipt(b.database, txHash)
 	return receipt, nil
+}
+
+// TransactionByHash checks the pool of pending transactions in addition to the
+// blockchain. The isPending return value indicates whether the transaction has been
+// mined yet. Note that the transaction may not be part of the canonical chain even if
+// it's not pending.
+func (b *SimulatedBackend) TransactionByHash(ctx context.Context, txHash common.Hash) (tx *types.Transaction, isPending bool, err error) {
+
+	tx = b.pendingBlock.Transaction(txHash)
+	if tx != nil {
+		return tx, true, nil
+	}
+
+	tx, _, _, _ = rawdb.ReadTransaction(b.database, txHash)
+	if tx != nil {
+		return tx, false, nil
+	}
+
+	return nil, false, gochain.NotFound
 }
 
 // PendingCodeAt returns the code associated with an account in the pending state.
@@ -311,11 +336,11 @@ func (b *SimulatedBackend) SendTransaction(ctx context.Context, tx *types.Transa
 		panic(fmt.Errorf("invalid transaction nonce: got %d, want %d", tx.Nonce(), nonce))
 	}
 
-	blocks, _ := core.GenerateChain(ctx, b.config, b.blockchain.CurrentBlock(), clique.NewFaker(), b.database, 1, func(ctx context.Context, number int, block *core.BlockGen) {
+	blocks, _ := core.GenerateChain(b.config, b.blockchain.CurrentBlock(), clique.NewFaker(), b.database, 1, func(number int, block *core.BlockGen) {
 		for _, tx := range b.pendingBlock.Transactions() {
-			block.AddTx(ctx, tx)
+			block.AddTx(tx)
 		}
-		block.AddTx(ctx, tx)
+		block.AddTx(tx)
 	})
 	statedb, _ := b.blockchain.State()
 

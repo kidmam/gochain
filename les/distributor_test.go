@@ -19,7 +19,6 @@
 package les
 
 import (
-	"context"
 	"math/rand"
 	"sync"
 	"testing"
@@ -40,8 +39,8 @@ func (r *testDistReq) canSend(dp distPeer) bool {
 	return ok
 }
 
-func (r *testDistReq) request(dp distPeer) func(context.Context) {
-	return func(context.Context) { dp.(*testDistPeer).send(r) }
+func (r *testDistReq) request(dp distPeer) func() {
+	return func() { dp.(*testDistPeer).send(r) }
 }
 
 type testDistPeer struct {
@@ -88,7 +87,7 @@ const (
 	testDistBufLimit       = 10000000
 	testDistMaxCost        = 1000000
 	testDistPeerCount      = 5
-	testDistReqCount       = 50000
+	testDistReqCount       = 5000
 	testDistMaxResendCount = 3
 )
 
@@ -98,17 +97,16 @@ func (p *testDistPeer) waitBefore(cost uint64) (time.Duration, float64) {
 	p.lock.RUnlock()
 	if sumCost < testDistBufLimit {
 		return 0, float64(testDistBufLimit-sumCost) / float64(testDistBufLimit)
-	} else {
-		return time.Duration(sumCost - testDistBufLimit), 0
 	}
+	return time.Duration(sumCost - testDistBufLimit), 0
 }
 
 func (p *testDistPeer) canQueue() bool {
 	return true
 }
 
-func (p *testDistPeer) queueSend(f func(context.Context)) {
-	f(context.Background())
+func (p *testDistPeer) queueSend(f func()) {
+	f()
 }
 
 func TestRequestDistributor(t *testing.T) {

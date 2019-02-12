@@ -20,7 +20,6 @@
 package geth
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -35,7 +34,7 @@ import (
 	"github.com/gochain-io/gochain/v3/p2p"
 	"github.com/gochain-io/gochain/v3/p2p/nat"
 	"github.com/gochain-io/gochain/v3/params"
-	whisper "github.com/gochain-io/gochain/v3/whisper/whisperv5"
+	whisper "github.com/gochain-io/gochain/v3/whisper/whisperv6"
 )
 
 // NodeConfig represents the collection of configuration values to fine tune the GoChain
@@ -151,8 +150,7 @@ func NewNode(datadir string, config *NodeConfig) (stack *Node, _ error) {
 		ethConf.NetworkId = uint64(config.EthereumNetworkID)
 		ethConf.DatabaseCache = config.EthereumDatabaseCache
 		if err := rawStack.Register(func(sctx *node.ServiceContext) (node.Service, error) {
-			ctx := context.TODO()
-			return les.New(ctx, sctx, &ethConf)
+			return les.New(sctx, &ethConf)
 		}); err != nil {
 			return nil, fmt.Errorf("ethereum init: %v", err)
 		}

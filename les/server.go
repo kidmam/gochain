@@ -18,7 +18,6 @@
 package les
 
 import (
-	"context"
 	"crypto/ecdsa"
 	"encoding/binary"
 	"math"
@@ -34,25 +33,41 @@ import (
 	"github.com/gochain-io/gochain/v3/log"
 	"github.com/gochain-io/gochain/v3/p2p"
 	"github.com/gochain-io/gochain/v3/p2p/discv5"
+	"github.com/gochain-io/gochain/v3/params"
 	"github.com/gochain-io/gochain/v3/rlp"
 )
 
 type LesServer struct {
-	config          *eth.Config
-	protocolManager *ProtocolManager
-	fcManager       *flowcontrol.ClientManager // nil if our node is client only
-	fcCostStats     *requestCostStats
-	defParams       *flowcontrol.ServerParams
-	lesTopics       []discv5.Topic
-	privateKey      *ecdsa.PrivateKey
-	quitSync        chan struct{}
+	lesCommons
 
-	chtIndexer, bloomTrieIndexer *core.ChainIndexer
+	fcManager    *flowcontrol.ClientManager // nil if our node is client only
+	fcCostStats  *requestCostStats
+	defParams    *flowcontrol.ServerParams
+	lesTopics    []discv5.Topic
+	privateKey   *ecdsa.PrivateKey
+	quitSync     chan struct{}
+	onlyAnnounce bool
 }
 
-func NewLesServer(ctx context.Context, eth *eth.GoChain, config *eth.Config) (*LesServer, error) {
+func NewLesServer(eth *eth.GoChain, config *eth.Config) (*LesServer, error) {
 	quitSync := make(chan struct{})
-	pm, err := NewProtocolManager(ctx, eth.BlockChain().Config(), false, ServerProtocolVersions, config.NetworkId, eth.EventMux(), newPeerSet(), eth.BlockChain(), eth.TxPool(), eth.ChainDb(), nil, nil, quitSync, new(sync.WaitGroup))
+	pm, err := NewProtocolManager(
+		eth.BlockChain().Config(),
+		light.DefaultServerIndexerConfig,
+		false,
+		config.NetworkId,
+		eth.EventMux(),
+		eth.Engine(),
+		newPeerSet(),
+		eth.BlockChain(),
+		eth.TxPool(),
+		eth.ChainDb(),
+		nil,
+		nil,
+		nil,
+		quitSync,
+		new(sync.WaitGroup),
+		config.ULC)
 	if err != nil {
 		return nil, err
 	}
@@ -63,24 +78,30 @@ func NewLesServer(ctx context.Context, eth *eth.GoChain, config *eth.Config) (*L
 	}
 
 	srv := &LesServer{
-		config:           config,
-		protocolManager:  pm,
-		quitSync:         quitSync,
-		lesTopics:        lesTopics,
-		chtIndexer:       light.NewChtIndexer(eth.ChainDb(), false),
-		bloomTrieIndexer: light.NewBloomTrieIndexer(eth.ChainDb(), false),
+		lesCommons: lesCommons{
+			config:           config,
+			chainDb:          eth.ChainDb(),
+			iConfig:          light.DefaultServerIndexerConfig,
+			chtIndexer:       light.NewChtIndexer(eth.ChainDb(), nil, params.CHTFrequencyServer, params.HelperTrieProcessConfirmations),
+			bloomTrieIndexer: light.NewBloomTrieIndexer(eth.ChainDb(), nil, params.BloomBitsBlocks, params.BloomTrieFrequency),
+			protocolManager:  pm,
+		},
+		quitSync:     quitSync,
+		lesTopics:    lesTopics,
+		onlyAnnounce: config.OnlyAnnounce,
 	}
+
 	logger := log.New()
 
 	chtV1SectionCount, _, _ := srv.chtIndexer.Sections() // indexer still uses LES/1 4k section size for backwards server compatibility
-	chtV2SectionCount := chtV1SectionCount / (light.CHTFrequencyClient / light.CHTFrequencyServer)
+	chtV2SectionCount := chtV1SectionCount / (params.CHTFrequencyClient / params.CHTFrequencyServer)
 	if chtV2SectionCount != 0 {
 		// convert to LES/2 section
 		chtLastSection := chtV2SectionCount - 1
 		// convert last LES/2 section index back to LES/1 index for chtIndexer.SectionHead
-		chtLastSectionV1 := (chtLastSection+1)*(light.CHTFrequencyClient/light.CHTFrequencyServer) - 1
+		chtLastSectionV1 := (chtLastSection+1)*(params.CHTFrequencyClient/params.CHTFrequencyServer) - 1
 		chtSectionHead := srv.chtIndexer.SectionHead(chtLastSectionV1)
-		chtRoot := light.GetChtV2Root(pm.chainDb, chtLastSection, chtSectionHead)
+		chtRoot := light.GetChtRoot(pm.chainDb, chtLastSectionV1, chtSectionHead)
 		logger.Info("Loaded CHT", "section", chtLastSection, "head", chtSectionHead, "root", chtRoot)
 	}
 	bloomTrieSectionCount, _, _ := srv.bloomTrieIndexer.Sections()
@@ -104,7 +125,7 @@ func NewLesServer(ctx context.Context, eth *eth.GoChain, config *eth.Config) (*L
 }
 
 func (s *LesServer) Protocols() []p2p.Protocol {
-	return s.protocolManager.SubProtocols
+	return s.makeProtocols(ServerProtocolVersions)
 }
 
 // Start starts the LES server
@@ -132,9 +153,7 @@ func (s *LesServer) SetBloomBitsIndexer(bloomIndexer *core.ChainIndexer) {
 
 // Stop stops the LES service
 func (s *LesServer) Stop() {
-	if err := s.chtIndexer.Close(); err != nil {
-		log.Error("Cannot close les chain indexer", "err", err)
-	}
+	s.chtIndexer.Close()
 	// bloom trie indexer is closed by parent bloombits indexer
 	s.fcCostStats.store()
 	s.fcManager.Stop()
@@ -278,9 +297,7 @@ func (s *requestCostStats) store() {
 	}
 
 	if data, err := rlp.EncodeToBytes(statsRlp); err == nil {
-		if err := s.db.GlobalTable().Put(rcStatsKey, data); err != nil {
-			log.Error("Cannot put les req cost stats", "err", err)
-		}
+		s.db.GlobalTable().Put(rcStatsKey, data)
 	}
 }
 
@@ -289,10 +306,8 @@ func (s *requestCostStats) getCurrentList() RequestCostList {
 	defer s.lock.Unlock()
 
 	list := make(RequestCostList, len(reqList))
-	//fmt.Println("RequestCostList")
 	for idx, code := range reqList {
 		b, m := s.stats[code].calc()
-		//fmt.Println(code, s.stats[code].cnt, b/1000000, m/1000000)
 		if m < 0 {
 			b += m
 			m = 0
